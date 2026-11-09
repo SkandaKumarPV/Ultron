@@ -1,0 +1,42 @@
+# ULTRON Core Dependencies
+# Phase 1: Foundation
+pyyaml>=6.0
+psutil>=5.9
+
+# Phase 2: Local LLM
+llama-cpp-python>=0.2.72
+
+# Phase 3: Workspace Analysis
+sentence-transformers>=2.2.0
+chromadb>=0.4.0
+pypdf>=3.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
+pandas>=2.0.0
+
+# Phase 4: Voice (STT/TTS)
+# whisper.cpp - installed separately
+# piper - installed separately
+
+# Phase 5: Image generation
+accelerate>=0.26.0
+diffusers>=0.30.0
+
+# Phase 9: Super Monitor (Optional Secondary Capabilities)
+requests>=2.31.0
+feedparser>=6.0.10
+folium>=0.16.0
+geopandas>=0.14.0
+shapely>=2.0.0
+geopy>=2.4.0
+# Weather/Disaster APIs
+# NOAA, USGS - no additional packages needed (REST APIs)
+
+# Optional: ONNX Runtime for embeddings (alternative to sentence-transformers)
+# onnxruntime-gpu>=1.16.0
+
+# Development
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+mypy>=1.5.0

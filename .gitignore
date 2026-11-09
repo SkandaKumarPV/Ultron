@@ -1,0 +1,32 @@
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local ULTRON runtime state and downloaded assets
+.ultron/cache/
+.ultron/chroma/
+.ultron/generated_images/
+.ultron/logs/
+.ultron/models/
+.ultron/news_cache/
+.ultron/tasks.db
+.ultron/voices/
+.ultron/workspaces/
+
+# Application logs
+logs/
+
+# Build output
+build/
+dist/
+*.spec.bak
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

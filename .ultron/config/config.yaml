@@ -1,0 +1,119 @@
+# ULTRON Configuration
+# All paths relative to C:\Ultron unless absolute
+
+ultron:
+  name: "ULTRON"
+  version: "0.1.0"
+  data_dir: ".ultron"
+  log_level: "INFO"
+
+# Hardware / Resource Limits
+resources:
+  max_vram_gb: 3.5          # Conservative limit for 4 GB dedicated VRAM
+  max_ram_gb: 12            # Leave 4 GB for OS
+  max_context_tokens: 4096  # Conservative context
+  max_concurrent_inferences: 1
+  unload_idle_after_seconds: 300
+
+# Model Configuration
+model:
+  # Will be populated after Phase 2 download
+  name: "qwen2.5-1.5b-instruct-q4_k_m"
+  repo_id: "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+  filename: "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+  path: "models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+  n_gpu_layers: -1          # Offload all possible LLM layers to GPU; fallback is automatic
+  n_ctx: 4096
+  n_batch: 512
+  n_threads: 8              # CPU threads for offloaded ops
+  verbose: false
+
+# Voice Pipeline
+voice:
+  enabled: true             # Enable voice pipeline
+  push_to_talk: true
+  wake_word: false
+  stt:
+    engine: "whisper.cpp"   # Local STT
+    model: "base.en"        # Small, fast model
+  tts:
+    engine: "piper"         # Local TTS
+    voice: "en_US-lessac-medium"
+  sample_rate: 16000
+  channels: 1
+
+# Workspace Configuration
+workspace:
+  default_path: null        # User selects per session
+  read_only_default: true
+  max_file_size_mb: 50
+  supported_extensions:
+    - ".txt"
+    - ".md"
+    - ".py"
+    - ".js"
+    - ".ts"
+    - ".json"
+    - ".yaml"
+    - ".yml"
+    - ".csv"
+    - ".pdf"
+    - ".docx"
+    - ".xlsx"
+    - ".log"
+  parser:
+    chunk_size: 512
+    chunk_overlap: 64
+  embedder:
+    model: "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim, fast, small
+    device: "auto"          # Prefer CUDA when available; fallback to CPU
+  retriever:
+    top_k: 5
+    similarity_threshold: 0.3
+
+# Tool Permissions
+permissions:
+  levels:
+    - "READ"
+    - "SEARCH"
+    - "CREATE"
+    - "MODIFY"
+    - "DELETE"
+    - "EXECUTE"
+    - "EXTERNAL_TRANSMIT"
+  default_level: "READ"
+  require_confirmation:
+    - "MODIFY"
+    - "DELETE"
+    - "EXECUTE"
+    - "EXTERNAL_TRANSMIT"
+
+# Security
+security:
+  audit_log_enabled: true
+  audit_log_path: "logs/audit.log"
+  workspace_isolation: true
+  cloud_transmission_blocked: true
+  allowed_external_domains: []
+
+# PC Control
+pc_control:
+  allowed_apps:
+    - "notepad.exe"
+    - "code.exe"
+    - "explorer.exe"
+    - "cmd.exe"
+    - "powershell.exe"
+    - "wt.exe"
+    - "chrome.exe"
+  allowed_paths:
+    - "C:\\Users\\%USERNAME%\\Documents"
+    - "C:\\Users\\%USERNAME%\\Desktop"
+    - "C:\\Ultron"
+
+# Memory
+memory:
+  general_db: "memory/general.db"
+  workspace_db_template: "workspaces/{workspace_id}/memory.db"
+  max_entries_per_workspace: 10000
+  retention_days: 90

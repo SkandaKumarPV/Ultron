@@ -1,0 +1,26 @@
+{
+  "apps": {
+    "notepad.exe": false,
+    "code.exe": false,
+    "chrome.exe": false,
+    "explorer.exe": false,
+    "cmd.exe": false,
+    "powershell.exe": false,
+    "wt.exe": false,
+    "excel.xlwaddin": false,
+    "python.exe": false
+  },
+  "folders": {
+    "Documents": true,
+    "Desktop": true,
+    "Downloads": false,
+    "Pictures": false,
+    "Music": false,
+    "Videos": false
+  },
+  "features": {
+    "spatial": false,
+    "speech": true,
+    "news": true
+  }
+}
