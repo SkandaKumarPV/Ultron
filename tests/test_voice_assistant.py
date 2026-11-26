@@ -1,6 +1,7 @@
 """Focused tests for wake-word transcript routing and common app commands."""
 from unittest.mock import patch
 from types import SimpleNamespace
+from threading import Event
 
 from ultron.voice.assistant import VoiceAssistant, strip_wake_phrase
 
@@ -11,17 +12,17 @@ def test_strip_wake_phrase_keeps_command():
     assert strip_wake_phrase("Hailtron open notepad") == "open notepad"
 
 
-def test_common_app_command_is_dispatched_before_kernel():
+def test_normalized_voice_command_respects_kernel_permission_denial():
     assistant = VoiceAssistant()
     assistant._normalize_voice_command = lambda transcript: "open vs code"
-    with patch("ultron.kernel.kernel.initialize"), \
-            patch("ultron.kernel.kernel.process", return_value=SimpleNamespace(
-                success=False, response_text="failed")), \
-            patch.object(assistant, "_direct_tool_dispatch", return_value="Opening vs code.") as dispatch:
-        response = assistant._execute("open vs cod", transcript="open vs cod")
+    denied = SimpleNamespace(success=False, response_text="VS Code permission denied")
+    with patch.object(assistant, "_prepare_voice_input", return_value=(True, "open vs cod")), patch(
+        "ultron.kernel.kernel.initialize"
+    ), patch("ultron.kernel.kernel.process", return_value=denied) as process:
+        response = assistant._execute("open vs cod")
 
-    assert response == "Opening vs code."
-    dispatch.assert_called_once_with("open vs code")
+    assert response == "VS Code permission denied"
+    assert process.call_args.args[0].input_text == "open vs code"
 
 
 def test_voice_transcript_is_sent_to_llm_normalizer():
@@ -92,29 +93,30 @@ def test_questions_reach_kernel_without_command_normalization():
         assert assistant._execute(question, transcript=question) == "workspace answer"
 
 
-def test_direct_dispatch_resolves_google_chrome_alias():
+def test_voice_alias_reaches_the_kernel_without_llm_correction():
     assistant = VoiceAssistant()
-    with patch("subprocess.Popen") as popen, \
-            patch("shutil.which", return_value=None), \
-            patch("ultron.voice.assistant.os.path.exists", return_value=True):
-        response = assistant._direct_tool_dispatch("open google chrome")
-
-    assert response == "Opening google chrome."
-    assert popen.call_args.args[0] == [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-    ]
+    with patch.object(assistant, "_prepare_voice_input", side_effect=AssertionError("Known alias")), patch(
+        "ultron.kernel.kernel.initialize"
+    ), patch("ultron.kernel.kernel.process", return_value=SimpleNamespace(success=True, response_text="Done")) as process:
+        assert assistant._execute("Hey, welcome. Open CGPT and search what is wrong.") == "Done"
+    assert process.call_args.args[0].input_text == "Open CGPT and search what is wrong."
 
 
 def test_transcript_reaches_response_and_tts():
     assistant = VoiceAssistant()
     assistant._execute = lambda command, **kwargs: f"Done: {command}"
-    assistant.speak = lambda text, block=False: True
+    def play(text):
+        assert text == "Done: open notepad"
+        assert assistant.state == assistant.state.SPEAKING
+        return True
+    assistant._speak_sync = play
 
     response = assistant.handle_transcript("hey ultron open notepad")
 
     assert response == "Done: open notepad"
     assert assistant.last_transcript == "hey ultron open notepad"
     assert assistant.last_response == "Done: open notepad"
+    assert assistant.state == assistant.state.DORMANT
 
 
 def test_push_to_talk_release_routes_complete_transcript():
@@ -137,25 +139,32 @@ def test_push_to_talk_release_routes_complete_transcript():
     assert routed == ["hey ultron open notepad"]
 
 
-def test_stt_retries_on_cpu_when_cuda_runtime_is_missing(tmp_path):
+def test_finished_capture_leaves_recording_state_even_without_release():
     assistant = VoiceAssistant()
-    assistant._stt = FakeCudaThenCpuModel()
-
-    with patch("ultron.voice.pipeline.voice_pipeline._load_stt") as load_stt:
-        def load_cpu_model(force_cpu=False):
-            from ultron.voice.pipeline import voice_pipeline
-            voice_pipeline._stt_model = FakeCpuModel()
-
-        load_stt.side_effect = load_cpu_model
-        assert assistant._transcribe_bytes(b"\0\0" * 1600) == "hello ultron"
-        load_stt.assert_called_once_with(force_cpu=True)
+    assistant.enabled = True
+    assistant.state = assistant.state.DORMANT
+    with patch.object(assistant, "_record_and_transcribe", return_value=None):
+        assert assistant.start_push_to_talk()
+        assistant._manual_thread.join(1)
+        assert not assistant._manual_thread.is_alive()
+        assert assistant.state == assistant.state.DORMANT
 
 
-class FakeCudaThenCpuModel:
-    def transcribe(self, *args, **kwargs):
-        raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+def test_assistant_uses_hosted_transcription():
+    assistant = VoiceAssistant()
+    audio = b"\0\0" * 1600
+    with patch("ultron.voice.assistant.transcribe_pcm", return_value="hello ultron") as transcribe:
+        assert assistant._transcribe_bytes(audio) == "hello ultron"
+    transcribe.assert_called_once_with(audio, sample_rate=16000, channels=1)
 
 
-class FakeCpuModel:
-    def transcribe(self, *args, **kwargs):
-        return iter([SimpleNamespace(text="hello ultron")]), SimpleNamespace(language="en")
+def test_armed_mode_routes_only_verified_wake_phrase():
+    assistant = VoiceAssistant()
+    with patch.object(assistant, "_record_and_transcribe") as record, patch.object(
+        assistant, "handle_transcript"
+    ) as handle:
+        for text in ("open notepad", "Hey ULTRON, open notepad"):
+            assistant.state = assistant.state.ARMED
+            record.return_value = text
+            assistant._listen_for_wake(Event())
+        handle.assert_called_once_with("Hey ULTRON, open notepad")

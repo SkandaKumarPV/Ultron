@@ -2,11 +2,14 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ultron.voice.pipeline import voice_pipeline
 
 
+@pytest.mark.skip(reason="Manual microphone check. Run python tests/test_voice.py.")
 def test_voice():
     print("Initializing voice pipeline...")
     voice_pipeline.initialize()

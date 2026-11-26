@@ -7,17 +7,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ultron.security.audit import audit_log, AuditEventType, AuditSeverity
 from ultron.voice.assistant import voice_assistant
 from ultron.voice.pipeline import voice_pipeline
+from ultron.voice.stt import TranscriptionError
 
 
 def main():
     print("=== ULTRON terminal voice test ===", flush=True)
-    print("Loading STT/TTS...", flush=True)
+    print("Checking voice setup...", flush=True)
     voice_pipeline.initialize()
     if not voice_pipeline.is_ready():
-        print("FAIL: STT model did not load. Check logs.", flush=True)
+        print(voice_pipeline.input_error(), flush=True)
         return 1
-    voice_pipeline.start(lambda text: print(f"TRANSCRIPT: {text}", flush=True))
-    voice_assistant.start()
+    voice_pipeline.start()
     print("PASS: voice engine ready", flush=True)
     print("Press Enter, speak your command, then press Enter again.", flush=True)
     input("START listening > ")
@@ -28,7 +28,12 @@ def main():
         voice_pipeline.stop()
         return 1
     input("STOP listening > ")
-    text = voice_pipeline.push_to_talk_stop()
+    try:
+        text = voice_pipeline.push_to_talk_stop()
+    except TranscriptionError as error:
+        print(error, flush=True)
+        voice_pipeline.stop()
+        return 1
     if not text:
         print("FAIL: no transcript produced. Check microphone input and logs.", flush=True)
         voice_pipeline.stop()

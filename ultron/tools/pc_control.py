@@ -1,5 +1,6 @@
 """ULTRON PC Control Tools - Application launching, file operations"""
 import os
+import json
 import subprocess
 import threading
 from pathlib import Path
@@ -25,21 +26,9 @@ class LaunchAppTool(BaseTool):
 
     def execute(self, app_name: str, args: List[str] = None) -> ToolResult:
         args = args or []
-        cfg = config.config.pc_control
         app_name = self._canonical_app_name(app_name)
-
-        # Check if app is allowed
-        allowed = False
-        for allowed_app in cfg.allowed_apps:
-            if app_name.lower() in allowed_app.lower() or allowed_app.lower() in app_name.lower():
-                allowed = True
-                break
-
-        if not allowed:
-            return ToolResult(
-                success=False,
-                error=f"Application '{app_name}' not in allowed list: {cfg.allowed_apps}"
-            )
+        if error := self.permission_error(app_name):
+            return ToolResult(success=False, error=error)
 
         try:
             # First, try to find the actual executable path for known apps
@@ -53,12 +42,10 @@ class LaunchAppTool(BaseTool):
                 app_name_base = app_name_lower
             
             # For Windows GUI apps, use os.startfile which is more reliable
-            if app_name_base in ['notepad', 'explorer', 'chrome', 'firefox', 'edge', 'code']:
+            if app_name_base in ['notepad', 'explorer', 'chrome', 'firefox', 'edge', 'code'] and not args:
                 if resolved_app:
-                    import os
                     os.startfile(resolved_app)
                 else:
-                    import os
                     os.startfile(app_name_base + '.exe')
                 # Give it a moment to start
                 import time
@@ -84,7 +71,7 @@ class LaunchAppTool(BaseTool):
             time.sleep(0.5)
 
             # Verify process is running
-            if proc.poll() is None:
+            if proc.poll() is None or (app_name_base == "chrome" and proc.returncode == 0):
                 return ToolResult(
                     success=True,
                     data=f"Launched {app_name} (PID: {proc.pid})",
@@ -100,6 +87,23 @@ class LaunchAppTool(BaseTool):
             return ToolResult(success=False, error=f"Application not found: {app_name}")
         except Exception as e:
             return ToolResult(success=False, error=f"Failed to launch: {e}")
+
+    @classmethod
+    def permission_error(cls, app_name: str) -> Optional[str]:
+        app = cls._canonical_app_name(app_name).casefold()
+        configured = {cls._canonical_app_name(name).casefold() for name in config.config.pc_control.allowed_apps}
+        if app not in configured:
+            return f"Application '{app_name}' is unavailable to ULTRON."
+        try:
+            grants = json.loads(config.resolve_path("config/permissions.json").read_text(encoding="utf-8-sig"))
+            if grants["apps"].get(app) is True:
+                return None
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, AttributeError, KeyError, TypeError):
+            return "Application permissions could not be read. Open Permissions and save your selections."
+        display = "Google Chrome" if app == "chrome.exe" else app
+        return f"Allow {display} in ULTRON → Permissions, then select Save Permissions."
 
     def _resolve_app_path(self, app_name: str) -> Optional[str]:
         """Resolve common application names to their full paths"""
@@ -154,6 +158,14 @@ class LaunchAppTool(BaseTool):
             "visual studio code": "code.exe",
             "vs code": "code.exe",
             "vscode": "code.exe",
+            "notepad": "notepad.exe",
+            "explorer": "explorer.exe",
+            "file explorer": "explorer.exe",
+            "command prompt": "cmd.exe",
+            "cmd": "cmd.exe",
+            "powershell": "powershell.exe",
+            "windows terminal": "wt.exe",
+            "terminal": "wt.exe",
         }
         name = app_name.strip().lower()
         return aliases.get(name, app_name)

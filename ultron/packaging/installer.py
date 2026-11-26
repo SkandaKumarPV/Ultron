@@ -104,7 +104,11 @@ pypdf>=3.0
 python-docx>=1.1.0
 openpyxl>=3.1.0
 pandas>=2.0.0
-faster-whisper>=1.0
+requests>=2.31.0
+python-dotenv>=1.0
+PySide6>=6.5
+playwright>=1.50
+pywin32>=306
 piper-tts>=1.0
 pyaudio>=0.2.14
 accelerate>=0.26.0
@@ -252,7 +256,6 @@ if __name__ == "__main__":
                 "voice": {
                     "enabled": True,
                     "push_to_talk": True,
-                    "stt": {"engine": "faster-whisper", "model": "base.en"},
                     "tts": {"engine": "piper", "voice": "en_US-lessac-medium"},
                 },
                 "workspace": {

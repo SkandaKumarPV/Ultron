@@ -4,8 +4,8 @@ ULTRON is a local, voice-first personal AI assistant for Windows. It combines a
 local language model with workspace search, image generation, voice input and
 spoken responses, PC automation tools, and a desktop control center.
 
-The application is designed to keep data and inference on the local machine.
-Downloaded models, permissions, indexes, logs, and generated output are stored
+Workspace files and language-model inference stay on the local machine. Voice
+input sends recorded speech to the configured transcription provider. Downloaded models, permissions, indexes, logs, and generated output are stored
 under `.ultron/` rather than in the source packages.
 
 ## Main capabilities
@@ -41,65 +41,73 @@ The workflow is:
 1. Select or create a workspace with read-only access enabled by default.
 2. Scan supported files within the workspace size limits.
 3. Parse supported formats such as Markdown, Python, JavaScript, TypeScript,
-   JSON, YAML, CSV, PDF, DOCX, XLSX, and log files.
+   JSON, YAML, CSV, PDF, DOCX, PPTX, XLSX, and log files.
 4. Split parsed content into overlapping chunks.
-5. Generate embeddings with the configured sentence-transformers model.
-6. Store vectors in a separate ChromaDB collection for that workspace.
-7. Retrieve the most relevant chunks for each question.
-8. Ask the local language model to answer only from the retrieved context and
-   return source information and a confidence score.
+5. Save and search text in a local SQLite full-text index for that folder.
+6. Send relevant passages to the configured local language model for an answer.
 
-Workspace indexes are isolated by workspace ID. The default retrieval
-configuration uses the five most relevant results and a similarity threshold of
-`0.3`. Workspace data is stored locally under `.ultron/chroma/` and can be
-removed without changing the source files.
+Select a folder in **Chat**, then select **Load & Index**. ULTRON automatically
+routes explicit file and folder questions to the selected workspace. The
+**Use selected folder context for chat** checkbox also applies workspace
+context to follow-up questions. Reindex after changing the folder contents.
 
-The Chat tab includes **Browse** and **Load & Index** controls for selecting a
-folder. After indexing, enable **Use selected folder context for chat** to ask
-normal chat questions about that folder and receive answers grounded in its
-files.
+- “What's in this folder?” lists top-level files and subfolders.
+- “Summarize the Autoencoders document” looks for a matching filename or title
+  anywhere in the selected workspace. It can handle small typos in document
+  titles and asks for a path when multiple files share the best match.
+- Questions across the workspace search a local SQLite index and send matching
+  excerpts to Qwen. If the model cannot load, ULTRON shows matching excerpts
+  and filenames.
+
+PDFs and slides need extractable text. Scans and text embedded in images
+require OCR, which the workspace reader does not provide.
 
 ### Voice assistant
 
 Voice functionality is isolated in `ultron/voice/`. It supports both
 push-to-talk and an Alexa-style armed listening flow.
 
-The voice pipeline uses:
+PyAudio captures the microphone. Deepgram, Cartesia, or ElevenLabs transcribes
+the recording, and the ULTRON kernel handles the text. Piper or Windows SAPI
+can speak the reply.
 
-- PyAudio for microphone capture.
-- faster-whisper for local speech-to-text.
-- Piper for local text-to-speech.
-- openWakeWord for acoustic wake-word detection.
-- Transcript verification to confirm the spoken keyword `ULTRON`.
-- The ULTRON kernel to execute the recognized command.
+Save the secret key in the project's ignored `.env` file as
+`DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, or `ELEVENLABS_API_KEY`. When multiple
+are set, ULTRON prefers Deepgram, then Cartesia, then ElevenLabs. Then launch ULTRON:
 
-Typical hands-free flow:
+```powershell
+python ultron_control_center.py
+```
 
-1. Turn the assistant on from the control center.
-2. Press `Alt+grave` or use the microphone control to arm listening.
-3. Say "Hey ULTRON" followed by a command.
-4. ULTRON verifies the wake phrase, sends the command to the kernel, and
-   speaks the response.
+A key in the process environment overrides the project file.
 
-Push-to-talk is also available for environments where continuous listening is
-not desired. Voice model files are kept under `.ultron/voices/`. If Windows
-blocks microphone access, the voice subsystem reports an actionable Privacy
-settings message instead of failing silently.
+- **Push-to-talk**. Hold `Alt+grave` in the control center, or select
+  **Start Voice Engine** in the Voice tab and hold **Hold to Speak**. Release
+  to transcribe and run the command.
+- **Wake phrase**. Enable the assistant, then say "Hey ULTRON" followed by
+  your command. After the reply, ULTRON returns to wake listening. Disable
+  voice to stop listening. In this mode, detected speech is sent to the configured provider
+  to check the wake phrase.
+- **Terminal**. Run `python scripts/voice_terminal.py` and follow the prompts.
+
+Voice input requires internet access.
+Use **Diagnose Microphone** in the Voice tab to check Windows mic access.
 
 ### Automation
 
-The Automation tab is not limited to calendar use. It provides examples for
-common local workflows and sends reviewed natural-language commands through
-the same kernel used by chat and voice:
+The **Automation** tab provides editable workflow presets and shows the
+result inline. Chat and voice use the same routing:
 
-- Create prioritized tasks and recurring or one-time reminders.
-- Run tests in the current workspace.
-- Inspect Git status and changes.
-- Analyze code structure or explain a source file.
-- Use the broader workspace and PC-control tools through permissions.
+- "Create a high priority task to review the build" runs the local task tool.
+- "Tell me about this folder" searches the indexed folder and calls the local model.
+- "Open Chrome and ask ChatGPT what ROS is" opens Chrome in a separate ULTRON
+  browser profile, submits the question to ChatGPT, and returns the visible
+  reply. Voice requests read the reply aloud. If Chrome or ChatGPT requires
+  sign-in or blocks automation, the workflow reports that failure.
+- "Search the web for ROS documentation" opens a Google search in Chrome.
 
-The example buttons load safe, editable commands into the Quick Command field;
-the user reviews the command before selecting **Execute**.
+Browser workflows require Chrome and the Playwright Python package. ULTRON
+sends the explicit ChatGPT question without attaching workspace files.
 
 ## Project structure
 
@@ -113,7 +121,6 @@ ULTRON/
 |   +-- model/                   Local language-model loading
 |   +-- security/                Permissions and audit logging
 |   +-- gui/                     Desktop UI components
-+-- frontend/                    Web dashboard assets
 +-- assets/                      Icons and static application assets
 +-- scripts/                     Model download and manual voice utilities
 +-- tests/                       Automated tests
@@ -128,7 +135,7 @@ ULTRON/
 - Windows
 - Python 3.11 recommended
 - A microphone for voice input
-- Enough storage for local language, speech, embedding, and optional image
+- Enough storage for local language, Piper voice, embedding, and optional image
   models
 - Optional GPU support for faster inference; CPU fallbacks are used when
   supported
@@ -139,9 +146,11 @@ non-diffusion features when optional components are unavailable.
 
 ## Installation
 
-From the repository root:
+From the repository root, with Python 3.11 installed:
 
 ```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
@@ -157,9 +166,7 @@ Download the default local language model:
 python scripts/download_model.py qwen2.5-1.5b-instruct-q4_k_m
 ```
 
-Voice setup expects the configured Piper voice files in `.ultron/voices/`.
-Wake-word models can be downloaded through openWakeWord or replaced with a
-local `ultron.onnx` or `hey_ultron.onnx` model in `.ultron/models/`.
+Optional Piper voice files go in `.ultron/voices/`.
 
 ## Running ULTRON
 
@@ -206,7 +213,7 @@ settings include:
 
 - Local language-model path and resource limits.
 - Workspace supported extensions, file-size limits, chunking, and retrieval.
-- Voice engine, model, sample rate, push-to-talk, and wake-word settings.
+- Voice capture and speech output settings.
 - Image backend and output behavior.
 - Permission and security settings.
 

@@ -59,7 +59,7 @@ The Voice tab controls local speech input and output:
 - Start and stop the voice engine.
 - Push-to-talk recording.
 - Optional hands-free wake-word listening.
-- Speech-to-text model selection.
+- ElevenLabs Scribe v3 transcription setup.
 - Text-to-speech voice selection.
 - Spoken reply settings.
 - Microphone diagnostics.
@@ -178,8 +178,7 @@ Workspace analysis is a local retrieval-augmented generation workflow.
 3. Supported files are discovered and filtered by size.
 4. Parsers extract text from supported file types.
 5. Content is divided into overlapping chunks.
-6. The embedding model converts chunks into vectors.
-7. ChromaDB stores vectors in a collection isolated by workspace ID.
+6. SQLite stores a full-text index isolated by workspace ID.
 
 Supported formats include:
 
@@ -190,11 +189,10 @@ Supported formats include:
 
 ### Question flow
 
-1. The question is embedded.
-2. Relevant chunks are retrieved using similarity search.
-3. The local language model receives the retrieved context.
-4. The response is grounded in the indexed files.
-5. Source previews and a confidence value are returned.
+1. The index looks for relevant passages and filenames.
+2. The local language model receives the retrieved context.
+3. ULTRON answers from the indexed files. If the model cannot load, it returns
+   matching excerpts.
 
 If a folder has not been indexed, ULTRON reports that it is not ready instead of
 silently answering as though the folder were available.
@@ -232,35 +230,19 @@ Generated images are stored under:
 
 Voice functionality is isolated in `ultron/voice/`.
 
-### Components
+PyAudio captures speech. ElevenLabs Scribe v3 turns the recording into text.
+The kernel handles the transcript, and Piper or Windows SAPI can speak the
+reply. See [voice setup](README.md#voice-assistant) for the API key and launch
+commands.
 
-- **PyAudio:** microphone capture.
-- **faster-whisper:** local speech-to-text.
-- **Piper:** local text-to-speech.
-- **openWakeWord:** acoustic wake-word detection.
-- **Kernel:** command routing and execution.
+- **Push-to-talk**. Hold `Alt+grave` in the control center or use **Hold to
+  Speak** in the Voice tab after starting the voice engine. Release to submit.
+- **Wake phrase**. Press `Alt+Shift+V` or select **Arm 'Hey ULTRON'**, then say
+  "Hey ULTRON" and the command. Enabling voice starts wake listening.
+  Detected speech is transcribed by ElevenLabs to check the wake phrase.
+  Saying the wake phrase alone starts a capture for the command.
 
-### Push-to-talk flow
-
-1. Start the voice engine.
-2. Hold the microphone button.
-3. Speak a command.
-4. Release the button.
-5. ULTRON transcribes the audio.
-6. The transcript is routed through Chat and the kernel.
-7. The response can be spoken aloud.
-
-### Wake-word flow
-
-1. Turn on the assistant.
-2. Arm listening with the microphone control or `Alt+grave`.
-3. Say "Hey ULTRON" and a command.
-4. The wake-word system detects the acoustic trigger.
-5. Transcript verification checks for ULTRON-related words.
-6. The command is executed and the response is spoken.
-
-Microphone errors are reported with Windows Privacy settings guidance instead
-of being hidden.
+Use **Diagnose Microphone** in the Voice tab to check Windows mic access.
 
 ## Automation and tools
 
@@ -340,7 +322,7 @@ Runtime data is stored under `.ultron/`:
 ├── config/              Configuration and permissions
 ├── models/              Local language and optional wake-word models
 ├── voices/              Piper voice files
-├── chroma/              Workspace vector indexes
+├── search/              Workspace full-text indexes
 ├── generated_images/    Generated image output
 ├── news_cache/          News-related cache data
 ├── workspaces/          Workspace metadata
@@ -373,9 +355,8 @@ Download the default local language model:
 python scripts/download_model.py qwen2.5-1.5b-instruct-q4_k_m
 ```
 
-Voice operation also requires the configured Piper voice files. Wake-word
-models may be downloaded by openWakeWord or supplied locally as
-`.ultron/models/ultron.onnx` or `.ultron/models/hey_ultron.onnx`.
+Voice input requires PyAudio and ElevenLabs credentials. Piper voice files
+are optional when Windows speech output is available.
 
 ## Running ULTRON
 
@@ -420,9 +401,9 @@ Model-heavy tests may take longer and require downloaded model files.
   currently implemented.
 - Live news, weather, and disaster data depend on external network services.
 - Diffusion image generation requires additional model/runtime resources.
-- Voice recognition requires compatible audio hardware and local voice models.
-- Wake-word detection uses available acoustic models plus transcript
-  verification; a custom ULTRON model can be supplied locally.
+- Voice recognition requires compatible audio hardware and ElevenLabs access.
+- While wake listening is enabled, detected speech is sent to ElevenLabs to
+  check for “Hey ULTRON”.
 - Some optional monitoring components may be unavailable when their third-party
   dependencies are not installed.
 

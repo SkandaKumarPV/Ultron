@@ -3,6 +3,9 @@ import sys
 import tempfile
 import os
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -144,41 +147,43 @@ Known Issues:
 
 
 def test_pc_control_tools():
-    """Test PC control tools"""
-    print("Testing PC control tools...")
-
+    """List files only within the selected workspace."""
     from ultron.tools.registry import tool_registry
 
-    # Test list_directory (safe)
-    result = tool_registry.execute("list_directory", path=str(Path.cwd()))
-    assert result.success
-    assert "items" in result.data
-
-    # Test launch_app with notepad (allowed)
-    result = tool_registry.execute("launch_app", app_name="notepad", args=[])
-    # May fail if notepad not in PATH, but should not crash
-    print(f"  Launch notepad: {result.success}")
-
-    print("  [OK] PC control tools working")
-    return True
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        folder = root / "workspace"
+        folder.mkdir()
+        (folder / "example.txt").touch()
+        ws = workspace_manager.create_workspace("Directory listing test", str(folder))
+        try:
+            with patch.object(workspace_manager, "get_current_workspace_id", return_value=ws.workspace_id):
+                result = tool_registry.execute("list_directory", path=str(folder))
+                denied = tool_registry.execute("list_directory", path=str(root))
+            assert result.success
+            assert [item["name"] for item in result.data["items"]] == ["example.txt"]
+            assert not denied.success
+            assert "Path not authorized" in denied.error
+        finally:
+            workspace_manager.remove_workspace(ws.workspace_id)
 
 
 def test_embedder_retriever():
     """Test embedder and retriever"""
     print("Testing embedder and retriever...")
 
-    # Initialize embedder
-    embedder.initialize()
+    if not embedder.initialize():
+        pytest.skip("Legacy vector-search integration requires a loadable embedding model")
 
     # Test embedding
     embeddings = embedder.embed(["Hello world", "Test sentence"])
     assert embeddings.shape == (2, 384)  # all-MiniLM-L6-v2 dimension
 
     # Test retriever init
-    retriever.initialize()
+    if not retriever.initialize():
+        pytest.skip("Legacy vector-search integration requires ChromaDB")
 
     print("  [OK] Embedder and retriever working")
-    return True
 
 
 def run_all_tests():
@@ -202,6 +207,8 @@ def run_all_tests():
         try:
             test()
             passed += 1
+        except pytest.skip.Exception as e:
+            print(f"  [SKIP] {test.__name__}: {e}")
         except Exception as e:
             import traceback
             print(f"  [FAIL] {test.__name__}: {type(e).__name__}: {e}")

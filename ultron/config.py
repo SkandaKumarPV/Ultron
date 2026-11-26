@@ -23,8 +23,6 @@ class VoiceConfig:
     enabled: bool = False
     push_to_talk: bool = True
     wake_word: bool = False
-    stt_engine: str = "whisper.cpp"
-    stt_model: str = "base.en"
     tts_engine: str = "piper"
     tts_voice: str = "en_US-lessac-medium"
     sample_rate: int = 16000
@@ -38,7 +36,7 @@ class WorkspaceConfig:
     max_file_size_mb: int = 50
     supported_extensions: list = field(default_factory=lambda: [
         ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
-        ".csv", ".pdf", ".docx", ".xlsx", ".log"
+        ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".log"
     ])
     chunk_size: int = 512
     chunk_overlap: int = 64
@@ -116,15 +114,12 @@ class UltronConfig:
 # Factory functions for nested YAML structures
 def create_voice_config(data: dict) -> VoiceConfig:
     """Create VoiceConfig from YAML data, handling nested structures"""
-    stt = data.get('stt', {})
     tts = data.get('tts', {})
     
     return VoiceConfig(
         enabled=data.get('enabled', False),
         push_to_talk=data.get('push_to_talk', True),
         wake_word=data.get('wake_word', False),
-        stt_engine=stt.get('engine', 'whisper.cpp') if isinstance(stt, dict) else 'whisper.cpp',
-        stt_model=stt.get('model', 'base.en') if isinstance(stt, dict) else 'base.en',
         tts_engine=tts.get('engine', 'piper') if isinstance(tts, dict) else 'piper',
         tts_voice=tts.get('voice', 'en_US-lessac-medium') if isinstance(tts, dict) else 'en_US-lessac-medium',
         sample_rate=data.get('sample_rate', 16000),
@@ -144,7 +139,7 @@ def create_workspace_config(data: dict) -> WorkspaceConfig:
         max_file_size_mb=data.get('max_file_size_mb', 50),
         supported_extensions=data.get('supported_extensions', [
             ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
-            ".csv", ".pdf", ".docx", ".xlsx", ".log"
+            ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".log"
         ]),
         chunk_size=parser.get('chunk_size', 512) if isinstance(parser, dict) else 512,
         chunk_overlap=parser.get('chunk_overlap', 64) if isinstance(parser, dict) else 64,
@@ -230,7 +225,7 @@ class WorkspaceConfig:
     max_file_size_mb: int = 50
     supported_extensions: list = field(default_factory=lambda: [
         ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
-        ".csv", ".pdf", ".docx", ".xlsx", ".log"
+        ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".log"
     ])
     chunk_size: int = 512
     chunk_overlap: int = 64
@@ -308,15 +303,12 @@ class UltronConfig:
 # Factory functions for nested YAML structures
 def create_voice_config(data: dict) -> VoiceConfig:
     """Create VoiceConfig from YAML data, handling nested structures"""
-    stt = data.get('stt', {})
     tts = data.get('tts', {})
     
     return VoiceConfig(
         enabled=data.get('enabled', False),
         push_to_talk=data.get('push_to_talk', True),
         wake_word=data.get('wake_word', False),
-        stt_engine=stt.get('engine', 'whisper.cpp') if isinstance(stt, dict) else 'whisper.cpp',
-        stt_model=stt.get('model', 'base.en') if isinstance(stt, dict) else 'base.en',
         tts_engine=tts.get('engine', 'piper') if isinstance(tts, dict) else 'piper',
         tts_voice=tts.get('voice', 'en_US-lessac-medium') if isinstance(tts, dict) else 'en_US-lessac-medium',
         sample_rate=data.get('sample_rate', 16000),
@@ -336,7 +328,7 @@ def create_workspace_config(data: dict) -> WorkspaceConfig:
         max_file_size_mb=data.get('max_file_size_mb', 50),
         supported_extensions=data.get('supported_extensions', [
             ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
-            ".csv", ".pdf", ".docx", ".xlsx", ".log"
+            ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".log"
         ]),
         chunk_size=parser.get('chunk_size', 512) if isinstance(parser, dict) else 512,
         chunk_overlap=parser.get('chunk_overlap', 64) if isinstance(parser, dict) else 64,
@@ -422,7 +414,7 @@ class WorkspaceConfig:
     max_file_size_mb: int = 50
     supported_extensions: list = field(default_factory=lambda: [
         ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
-        ".csv", ".pdf", ".docx", ".xlsx", ".log"
+        ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".log"
     ])
     chunk_size: int = 512
     chunk_overlap: int = 64
@@ -500,15 +492,12 @@ class UltronConfig:
 # Factory functions for nested YAML structures
 def create_voice_config(data: dict) -> VoiceConfig:
     """Create VoiceConfig from YAML data, handling nested structures"""
-    stt = data.get('stt', {})
     tts = data.get('tts', {})
     
     return VoiceConfig(
         enabled=data.get('enabled', False),
         push_to_talk=data.get('push_to_talk', True),
         wake_word=data.get('wake_word', False),
-        stt_engine=stt.get('engine', 'whisper.cpp') if isinstance(stt, dict) else 'whisper.cpp',
-        stt_model=stt.get('model', 'base.en') if isinstance(stt, dict) else 'base.en',
         tts_engine=tts.get('engine', 'piper') if isinstance(tts, dict) else 'piper',
         tts_voice=tts.get('voice', 'en_US-lessac-medium') if isinstance(tts, dict) else 'en_US-lessac-medium',
         sample_rate=data.get('sample_rate', 16000),
@@ -528,7 +517,7 @@ def create_workspace_config(data: dict) -> WorkspaceConfig:
         max_file_size_mb=data.get('max_file_size_mb', 50),
         supported_extensions=data.get('supported_extensions', [
             ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
-            ".csv", ".pdf", ".docx", ".xlsx", ".log"
+            ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".log"
         ]),
         chunk_size=parser.get('chunk_size', 512) if isinstance(parser, dict) else 512,
         chunk_overlap=parser.get('chunk_overlap', 64) if isinstance(parser, dict) else 64,
@@ -614,7 +603,7 @@ class WorkspaceConfig:
     max_file_size_mb: int = 50
     supported_extensions: list = field(default_factory=lambda: [
         ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
-        ".csv", ".pdf", ".docx", ".xlsx", ".log"
+        ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".log"
     ])
     chunk_size: int = 512
     chunk_overlap: int = 64
@@ -753,13 +742,12 @@ class Config:
 
     def get_model_path(self) -> Path:
         """Resolve model path relative to data_dir"""
-        base = self._get_project_root()
-        return base / self.config.data_dir / self.config.model.path
+        return self.resolve_path(self.config.model.path)
 
     def resolve_path(self, relative_path: str) -> Path:
         """Resolve path relative to data_dir"""
-        base = self._get_project_root()
-        return base / self.config.data_dir / relative_path
+        data_dir = self.config.data_dir
+        return self._get_project_root() / data_dir / relative_path
 
 
 # Global instance

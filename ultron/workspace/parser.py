@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Generator
 from dataclasses import dataclass
 import logging
+import re
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +249,40 @@ class XLSXParser(BaseParser):
             logger.error(f"Failed to parse XLSX {file_path}: {e}")
 
 
+class PowerPointParser(BaseParser):
+    """Read slide text from a PowerPoint file without starting Office."""
+
+    extensions = [".pptx"]
+    _slide = re.compile(r"ppt/slides/slide(\d+)\.xml")
+    _drawing = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+    def parse(self, file_path: Path) -> Generator[ParsedChunk, None, None]:
+        try:
+            with ZipFile(file_path) as archive:
+                slides = [
+                    (int(match[1]), info) for info in archive.infolist()
+                    if (match := self._slide.fullmatch(info.filename))
+                ]
+                for number, file in sorted(slides, key=lambda slide: slide[0])[:500]:
+                    if file.file_size > 2 * 1024 * 1024:
+                        continue
+                    try:
+                        root = ElementTree.fromstring(archive.read(file))
+                    except ElementTree.ParseError:
+                        logger.warning("Could not parse slide %s in %s", number, file_path)
+                        continue
+                    paragraphs = []
+                    for paragraph in root.iter(f"{self._drawing}p"):
+                        line = "".join(run.text or "" for run in paragraph.iter(f"{self._drawing}t")).strip()
+                        if line:
+                            paragraphs.append(line)
+                    if paragraphs:
+                        content = f"Slide {number}\n" + "\n".join(paragraphs)
+                        yield ParsedChunk(content, str(file_path), number, 0, len(content), {"slide": number})
+        except (OSError, BadZipFile):
+            logger.warning("Could not read PowerPoint file %s", file_path)
+
+
 class ParserRegistry:
     """Registry of file parsers"""
 
@@ -280,3 +317,4 @@ parser_registry.register(TextParser())
 parser_registry.register(PDFParser())
 parser_registry.register(DocxParser())
 parser_registry.register(XLSXParser())
+parser_registry.register(PowerPointParser())

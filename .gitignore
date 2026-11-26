@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
+.env
+.env.local
 .mypy_cache/
 .coverage
 htmlcov/
@@ -12,6 +15,7 @@ htmlcov/
 .ultron/generated_images/
 .ultron/logs/
 .ultron/models/
+.ultron/search/
 .ultron/news_cache/
 .ultron/tasks.db
 .ultron/voices/

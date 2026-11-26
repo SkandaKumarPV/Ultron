@@ -67,14 +67,11 @@ class Chunker:
                 ))
                 chunk_index += 1
 
-            # Move start forward with overlap
-            start = end - self.config.chunk_overlap
-            if start < 0:
-                start = 0
-
-            # Prevent infinite loop
-            if start >= len(content):
+            if end == len(content):
                 break
+            # Keep the configured overlap when it still advances the window.
+            next_start = end - self.config.chunk_overlap
+            start = next_start if next_start > start else end
 
         return chunks
 

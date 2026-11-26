@@ -15,15 +15,22 @@ openpyxl>=3.1.0
 pandas>=2.0.0
 
 # Phase 4: Voice (STT/TTS)
-# whisper.cpp - installed separately
-# piper - installed separately
+numpy>=1.26
+python-dotenv>=1.0
+requests>=2.31.0
+pyaudio>=0.2.14
+piper-tts>=1.0
+pywin32>=306; sys_platform == "win32"
+
+# Windows control center
+PySide6>=6.5
+playwright>=1.50
 
 # Phase 5: Image generation
 accelerate>=0.26.0
 diffusers>=0.30.0
 
 # Phase 9: Super Monitor (Optional Secondary Capabilities)
-requests>=2.31.0
 feedparser>=6.0.10
 folium>=0.16.0
 geopandas>=0.14.0

@@ -2,13 +2,16 @@
 from typing import Optional, Dict, Any, List, AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 import asyncio
+import re
 import time
 import threading
 import uuid
 
 from ultron.config import config
-from ultron.tools.registry import tool_registry, ToolResult, ToolCategory
+from ultron.automation import command_text, explicit_action, wants_folder_contents, wants_workspace
+from ultron.tools.registry import tool_registry, ToolResult
 from ultron.security.permissions import permission_registry, PermissionLevel
 from ultron.security.audit import audit_log, AuditEventType, AuditSeverity
 from ultron.model.loader import ModelManager
@@ -195,7 +198,7 @@ class Kernel:
         elif request.request_type == RequestType.TEXT_COMMAND:
             return await self._handle_text_command(request)
         elif request.request_type == RequestType.WORKSPACE_QUERY:
-            return await self._handle_workspace_query(request)
+            return await self._handle_text_command(request, prefer_workspace=True)
         elif request.request_type == RequestType.PC_ACTION:
             return await self._handle_pc_action(request)
         elif request.request_type == RequestType.MODEL_INFERENCE:
@@ -215,74 +218,58 @@ class Kernel:
         # Voice commands go through same pipeline as text but with voice_mode=True
         return await self._handle_text_command(request)
 
-    async def _handle_text_command(self, request: UltronRequest) -> UltronResponse:
+    async def _handle_text_command(self, request: UltronRequest, prefer_workspace: bool = False) -> UltronResponse:
         """Handle text command - parse intent, execute tools, respond"""
+        action = explicit_action(request.input_text)
+        if action:
+            name, arguments = action
+            workspace_id = request.workspace_id if name in ("open_file", "open_folder") else None
+            if workspace_id is not None:
+                arguments["workspace_id"] = workspace_id
+            result = await tool_registry.execute_async(name, **arguments)
+            message = self._format_tool_response(result)
+            if result.success and name == "create_task":
+                message = f"Created task: {result.data['title']}"
+            elif result.success and name == "list_tasks":
+                message = "\n".join(f"• {task['title']} ({task['status']})" for task in result.data["tasks"]) or "No tasks yet."
+            return UltronResponse(
+                request_id=request.request_id, success=result.success,
+                response_text=message, tool_results=[result],
+                metadata={"route": "browser" if name == "ask_in_browser" or arguments.get("args") else "tool"},
+            )
+        if re.match(r"^open\s+(?:the\s+)?(?:file|folder)\b", command_text(request.input_text), re.I):
+            return UltronResponse(request_id=request.request_id, success=False,
+                                  response_text="Give the full path of the file or folder you want to open.")
+        if wants_workspace(request.input_text):
+            return await self._handle_workspace_query(request)
         # Check if it's a direct tool command
         tool_result = await self._try_direct_tool_execution(request)
         if tool_result:
             return tool_result
 
+        if prefer_workspace and request.workspace_id:
+            return await self._handle_workspace_query(request)
         # Otherwise, use LLM to understand and respond
         return await self._handle_model_inference(request)
 
     async def _try_direct_tool_execution(self, request: UltronRequest) -> Optional[UltronResponse]:
         """Try to match request to a direct tool call"""
-        # Simple keyword-based routing for common commands
-        text = request.input_text.lower()
-
-        # App launching - check for "open/launch/start <app>" pattern first
-        import re
-        app_match = re.search(r'(open|launch|start)\s+(\w+)', text)
-        if app_match:
-            action, app_name = app_match.groups()
-            # Try launch_app tool
-            tool = tool_registry.get("launch_app")
-            if tool:
-                args = {"app_name": app_name + ".exe" if not app_name.endswith(".exe") else app_name}
-                result = await tool_registry.execute_async(
-                    tool.name, workspace_id=request.workspace_id, **args
-                )
+        text = command_text(request.input_text)
+        match = re.fullmatch(r"(?:open|launch|start)\s+([\w .+-]+?)[.!?]*", text, re.I)
+        if match is None or re.search(r"\b(?:and|then|search)\b", match[1], re.I):
+            if re.match(r"^(?:open|launch|start|search)\b", text, re.I):
                 return UltronResponse(
-                    request_id=request.request_id,
-                    success=result.success,
-                    response_text=self._format_tool_response(result),
-                    tool_results=[result],
+                    request_id=request.request_id, success=False,
+                    response_text="Say which app to open, or give a search such as 'Open Chrome and search for Chargebee.'",
+                    metadata={"route": "tool"},
                 )
-
-        # File/folder opening
-        if "open " in text:
-            for tool in tool_registry.get_by_category(ToolCategory.PC_CONTROL):
-                if tool.name in ("open_file", "open_folder"):
-                    if tool.name in text or any(kw in text for kw in tool.name.split("_")):
-                        result = await tool_registry.execute_async(
-                            tool.name, workspace_id=request.workspace_id, **self._extract_tool_args(text, tool)
-                        )
-                        return UltronResponse(
-                            request_id=request.request_id,
-                            success=result.success,
-                            response_text=self._format_tool_response(result),
-                            tool_results=[result],
-                        )
-
-        return None
-
-    def _extract_tool_args(self, text: str, tool) -> Dict:
-        """Extract tool arguments from text (simplified)"""
-        args = {}
-        for param in tool.parameters:
-            if param.name == "path" or param.name == "file_path":
-                # Try to extract path
-                import re
-                paths = re.findall(r'[A-Za-z]:[\\/][^\s]*|[~/][^\s]*', text)
-                if paths:
-                    args[param.name] = paths[0]
-            elif param.name == "app_name":
-                # Extract app name after "open"
-                import re
-                match = re.search(r'open\s+(\w+)', text)
-                if match:
-                    args[param.name] = match.group(1) + ".exe"
-        return args
+            return None
+        result = await tool_registry.execute_async("launch_app", app_name=match[1].strip())
+        return UltronResponse(
+            request_id=request.request_id, success=result.success,
+            response_text=self._format_tool_response(result), tool_results=[result],
+            metadata={"route": "tool"},
+        )
 
     def _format_tool_response(self, result: ToolResult) -> str:
         """Format tool result for user"""
@@ -311,6 +298,15 @@ class Kernel:
             )
 
         workspace = self._workspace_manager.get_workspace(request.workspace_id)
+        if workspace and wants_folder_contents(request.input_text):
+            from ultron.workspace.analyzer import workspace_analyzer
+            try:
+                inventory = await asyncio.to_thread(workspace_analyzer.folder_contents, Path(workspace.path))
+            except OSError:
+                return UltronResponse(request_id=request.request_id, success=False,
+                                      response_text="I could not read the selected folder. Check that it still exists.")
+            return UltronResponse(request_id=request.request_id, success=True, response_text=inventory,
+                                  metadata={"route": "folder contents"})
         if not workspace or workspace.index_status != "ready":
             status = workspace.index_status if workspace else "not found"
             return UltronResponse(
@@ -334,7 +330,7 @@ class Kernel:
             request_id=request.request_id,
             success=True,
             response_text=response_text,
-            metadata={"context_sources": [c.get("source", "") for c in context]},
+            metadata={"route": "local workspace", "context_sources": [c.get("source", "") for c in context]},
         )
 
     async def _handle_pc_action(self, request: UltronRequest) -> UltronResponse:
@@ -378,7 +374,7 @@ class Kernel:
             request_id=request.request_id,
             success=True,
             response_text=response_text,
-            metadata={"model": self._model_manager.get_model_info()},
+            metadata={"route": "local model", "model": self._model_manager.get_model_info()},
         )
 
     async def _handle_system(self, request: UltronRequest) -> UltronResponse:

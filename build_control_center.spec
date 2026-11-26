@@ -21,6 +21,7 @@ a = Analysis(
         ('ultron/config.py', 'ultron'),
         ('.ultron/config/config.yaml', '.ultron/config'),
         ('.ultron/config/permissions.json', '.ultron/config'),
+        ('assets/globe_land.json', 'assets'),
     ],
     hiddenimports=[
         'ultron',

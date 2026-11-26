@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-ULTRON Control Center - Unified GUI
-One icon. One interface. All features.
-
-Tabs: Chat | Voice | Automation | Monitor | Permissions | Modules | Settings
+ULTRON Control Center desktop application.
 """
 import sys
 import os
@@ -14,13 +11,15 @@ import asyncio
 import threading
 from pathlib import Path
 from datetime import datetime
+from math import isfinite
+from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 # Qt
 try:
     from PySide6.QtWidgets import (
-        QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QLabel, QPushButton, QTextEdit, QLineEdit, QComboBox, QCheckBox,
         QScrollArea, QFrame, QMenuBar, QMenu, QStatusBar, QSystemTrayIcon,
         QPlainTextEdit, QGroupBox, QSpinBox, QListWidget, QListWidgetItem,
@@ -29,13 +28,13 @@ try:
         QInputDialog, QStyle, QStyleFactory, QProgressBar, QProgressDialog,
         QRadioButton, QButtonGroup, QSpacerItem
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, QSize, QEvent
+    from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, QSize, QEvent, QSettings
     from PySide6.QtGui import QFont, QColor, QAction, QKeySequence, QIcon, QShortcut
     HAS_QT = True
 except ImportError:
     try:
         from PyQt5.QtWidgets import (
-            QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
+            QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
             QLabel, QPushButton, QTextEdit, QLineEdit, QComboBox, QCheckBox,
             QScrollArea, QFrame, QMenuBar, QMenu, QStatusBar, QSystemTrayIcon,
             QPlainTextEdit, QGroupBox, QSpinBox, QListWidget, QListWidgetItem,
@@ -44,7 +43,7 @@ except ImportError:
             QInputDialog, QStyle, QProgressBar, QProgressDialog, QRadioButton,
             QButtonGroup, QSpacerItem, QShortcut
         )
-        from PyQt5.QtCore import Qt, QTimer, Signal, QThread, QObject, QSize, QEvent
+        from PyQt5.QtCore import Qt, QTimer, pyqtSignal as Signal, QThread, QObject, QSize, QEvent, QSettings
         from PyQt5.QtGui import QFont, QColor, QAction, QKeySequence, QIcon
         HAS_QT = True
     except ImportError:
@@ -61,36 +60,27 @@ from ultron.tools.registry import tool_registry
 from ultron.voice.assistant import voice_assistant, AssistantState
 from ultron.voice.wake_word import wake_word_detector, MIC_BLOCK_MESSAGE
 
-# Frontend dashboard (embedded web view)
-try:
-    from ultron.gui.home_tab import HomeTab
-    HAS_HOME_TAB = True
-except ImportError:
-    HAS_HOME_TAB = False
-    HomeTab = None
+from ultron.gui.command_center import CommandCenter, CommandShell, label
 
 DARK = """
-QMainWindow, QWidget { background: #1e1e2e; color: #cdd6f4; font-family: 'Segoe UI'; font-size: 10pt; }
-QTabWidget::pane { border: 1px solid #313244; background: #1e1e2e; }
-QTabBar::tab { background: #313244; color: #a6adc8; padding: 10px 18px; margin-right: 2px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
-QTabBar::tab:selected { background: #1e1e2e; color: #cdd6f4; border-bottom: 2px solid #89b4fa; }
-QPushButton { background: #313244; color: #cdd6f4; border: 1px solid #45475a; padding: 8px 14px; border-radius: 6px; }
-QPushButton:hover { background: #45475a; border-color: #89b4fa; }
-QPushButton:pressed { background: #585b70; }
-QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QTextBrowser { background: #181825; color: #cdd6f4; border: 1px solid #313244; padding: 6px; border-radius: 4px; }
-QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #89b4fa; }
-QListWidget, QTableWidget { background: #181825; color: #cdd6f4; border: 1px solid #313244; alternate-background-color: #1e1e2e; }
-QHeaderView::section { background: #313244; color: #cdd6f4; padding: 6px; border: 1px solid #45475a; }
-QGroupBox { border: 1px solid #313244; border-radius: 6px; margin-top: 12px; padding-top: 8px; font-weight: 600; }
-QGroupBox::title { color: #89b4fa; left: 10px; padding: 0 4px; }
-QStatusBar { background: #181825; color: #a6adc8; }
-QMenuBar { background: #181825; color: #cdd6f4; }
-QMenu { background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244; }
-QMenu::item:selected { background: #313244; }
-QScrollBar:vertical { background: #181825; width: 10px; }
-QScrollBar::handle:vertical { background: #585b70; border-radius: 5px; min-height: 30px; }
-QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #45475a; border-radius: 3px; }
-QCheckBox::indicator:checked { background: #89b4fa; }
+QMainWindow, QWidget { background: #181316; color: #f3e6e7; font-family: 'Segoe UI'; font-size: 10pt; }
+QPushButton { background: #452b33; color: #f3e6e7; border: 1px solid #62404a; padding: 8px 14px; border-radius: 6px; }
+QPushButton:hover { background: #62404a; border-color: #ffaba0; }
+QPushButton:pressed { background: #85535d; }
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QTextBrowser { background: #130f12; color: #f3e6e7; border: 1px solid #452b33; padding: 6px; border-radius: 4px; }
+QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #ffaba0; }
+QListWidget, QTableWidget { background: #130f12; color: #f3e6e7; border: 1px solid #452b33; alternate-background-color: #181316; }
+QHeaderView::section { background: #452b33; color: #f3e6e7; padding: 6px; border: 1px solid #62404a; }
+QGroupBox { border: 1px solid #452b33; border-radius: 6px; margin-top: 12px; padding-top: 8px; font-weight: 600; }
+QGroupBox::title { color: #ffaba0; left: 10px; padding: 0 4px; }
+QStatusBar { background: #130f12; color: #c3adb2; }
+QMenuBar { background: #130f12; color: #f3e6e7; }
+QMenu { background: #181316; color: #f3e6e7; border: 1px solid #452b33; }
+QMenu::item:selected { background: #452b33; }
+QScrollBar:vertical { background: #130f12; width: 10px; }
+QScrollBar::handle:vertical { background: #85535d; border-radius: 5px; min-height: 30px; }
+QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #62404a; border-radius: 3px; }
+QCheckBox::indicator:checked { background: #ffaba0; }
 """
 
 # ==================================================================
@@ -170,316 +160,75 @@ def save_perms(data):
 class VoiceAssistantPanel(QWidget):
     """Alexa-style voice assistant: state ring, transcript and reply."""
 
+    state_changed = Signal(object, dict)
+    transcript_received = Signal(str)
+    response_received = Signal(str)
+
     STATE_TEXT = {
-        AssistantState.OFF: ("🔴 Off", "#f38ba8", "Assistant engine is off"),
-        AssistantState.DORMANT: ("🟢 On — idle", "#a6e3a1", "Ready. Say 'Hey ULTRON' or press Alt+`"),
-        AssistantState.ARMED: ("🎤 Listening...", "#fab387", "Waiting for the wake word 'ULTRON'"),
-        AssistantState.CAPTURING: ("🎙 Recording command", "#f9e2af", "Speak your command now"),
-        AssistantState.THINKING: ("🟡 Thinking...", "#f9e2af", "Running your command"),
-        AssistantState.SPEAKING: ("🔊 Speaking", "#89b4fa", "Speaking the reply"),
-        AssistantState.ERROR: ("⛔ Error", "#f38ba8", "Something went wrong"),
+        AssistantState.OFF: "Voice off",
+        AssistantState.DORMANT: "Voice ready",
+        AssistantState.ARMED: "Waiting for “Hey ULTRON”",
+        AssistantState.CAPTURING: "Recording",
+        AssistantState.TRANSCRIBING: "Transcribing",
+        AssistantState.THINKING: "Processing command",
+        AssistantState.SPEAKING: "Speaking",
+        AssistantState.ERROR: "Voice needs attention",
     }
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._build()
+    def __init__(self):
+        super().__init__()
+        self.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
-
-        # big state button
-        self.power_btn = QPushButton("🎤")
-        self.power_btn.setFixedSize(132, 132)
-        self.power_btn.setStyleSheet(
-            "font-size: 42pt; border-radius: 66px; background: #313244; border: 2px solid #45475a;")
-        self.power_btn.clicked.connect(self.toggle_power)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_row.addWidget(self.power_btn)
-        btn_row.addStretch()
-        lay.addLayout(btn_row)
-
-        self.state_lbl = QLabel("🔴 Off")
-        self.state_lbl.setStyleSheet("font-size: 14pt; font-weight: 700; color: #f38ba8;")
-        self.state_lbl.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self.state_lbl)
-
-        self.hint_lbl = QLabel("Assistant engine is off")
-        self.hint_lbl.setStyleSheet("color: #a6adc8;")
-        self.hint_lbl.setAlignment(Qt.AlignCenter)
-        self.hint_lbl.setWordWrap(True)
-        lay.addWidget(self.hint_lbl)
-
-        self.listen_btn = QPushButton("▶ Start Voice Assistant")
-        self.listen_btn.clicked.connect(self.toggle_power)
-        lay.addWidget(self.listen_btn)
-
-        # transcript / reply log
         self.log = QTextBrowser()
-        self.log.setStyleSheet("background: #181825; border: 1px solid #313244; padding: 8px;")
-        self.log.setMaximumHeight(150)
-        lay.addWidget(self.log)
+        self.log.setObjectName("commandTranscript")
+        self.log.setPlaceholderText("Voice transcripts and replies appear here.")
+        self.log.setMinimumHeight(64)
+        layout.addWidget(self.log, 1)
 
-        # hook the assistant callbacks
-        voice_assistant.on_state_change = self._on_state
-        voice_assistant.on_transcript = self._on_transcript
-        voice_assistant.on_response = self._on_response
+        controls = QHBoxLayout()
+        self.hint_lbl = label("", "commandMuted")
+        self.hint_lbl.setWordWrap(True)
+        controls.addWidget(self.hint_lbl, 1)
+        self.listen_btn = QPushButton("Enable voice")
+        self.listen_btn.setObjectName("commandLink")
+        self.listen_btn.clicked.connect(self.toggle_power)
+        controls.addWidget(self.listen_btn)
+        layout.addLayout(controls)
+
+        self.state_changed.connect(self._sync_state)
+        self.transcript_received.connect(lambda text: self._append("You", text))
+        self.response_received.connect(lambda text: self._append("ULTRON", text))
+        voice_assistant.on_state_change = self.state_changed.emit
+        voice_assistant.on_transcript = self.transcript_received.emit
+        voice_assistant.on_response = self.response_received.emit
         self._sync_state()
 
-    # ---------------- power ----------------
     def toggle_power(self):
         if voice_assistant.enabled:
             voice_assistant.stop()
         else:
-            ok = voice_assistant.start()
-            if not ok:
-                QMessageBox.warning(self, "Voice engine failed",
-                                    (voice_assistant.error or "unknown")[:400])
+            voice_assistant.start()
         self._sync_state()
 
     def arm_listen(self):
-        """Alt+` pressed: arm the wake word (auto-starts the engine)."""
-        if not voice_assistant.enabled:
-            if not voice_assistant.start():
-                self._show_mic_block(voice_assistant.error)
-                self._sync_state()
-                return
         voice_assistant.arm()
         self._sync_state()
 
-    # ---------------- state ----------------
-    def _on_state(self, state: AssistantState, data: dict):
-        self._sync_state()
-        if state == AssistantState.ERROR:
-            self._show_mic_block(data.get("error") or voice_assistant.error)
+    def _append(self, speaker, text):
+        stamp = time.strftime("%H:%M")
+        self.log.append(
+            f'<p><b style="color:#ffaba0;">{speaker}</b> '
+            f'<span style="color:#9ab0c6;">{stamp}</span><br>{html.escape(text)}</p>'
+        )
 
-    def _on_transcript(self, text: str):
-        ts = time.strftime("%H:%M:%S")
-        self.log.append(f'<p style="color:#89b4fa;margin:0;"><b>You</b> <span style="color:#6c7086">({ts})</span><br>{html.escape(text)}</p>')
-
-    def _on_response(self, text: str):
-        ts = time.strftime("%H:%M:%S")
-        self.log.append(f'<p style="color:#a6e3a1;margin:0 0 10px 0;"><b>ULTRON</b> <span style="color:#6c7086">({ts})</span><br>{html.escape(text)}</p>')
-
-    def _sync_state(self):
-        st = voice_assistant.state
-        icon, color, hint = self.STATE_TEXT.get(st, ("⚪", "#a6adc8", ""))
-        self.state_lbl.setText(icon)
-        self.state_lbl.setStyleSheet(f"font-size: 14pt; font-weight: 700; color: {color};")
-        self.hint_lbl.setText(hint)
-        if st == AssistantState.OFF:
-            self.power_btn.setText("🎤")
-            self.power_btn.setStyleSheet(
-                "font-size: 42pt; border-radius: 66px; background: #313244; border: 2px solid #45475a;")
-            self.listen_btn.setText("▶ Start Voice Assistant")
-        else:
-            self.power_btn.setText("⏹")
-            self.power_btn.setStyleSheet(
-                f"font-size: 30pt; border-radius: 66px; background: {color}; border: 2px solid {color}; color: #1e1e2e;")
-            self.listen_btn.setText("⏹ Stop Voice Assistant")
-
-    def _show_mic_block(self, detail: str = ""):
-        mb = QMessageBox(self)
-        mb.setIcon(QMessageBox.Warning)
-        mb.setWindowTitle("Microphone blocked")
-        mb.setText("Windows is blocking microphone access.\n\n"
-                   "Settings > Privacy & security > Microphone > "
-                   "'Let desktop apps access the microphone'.\n\n" + (detail or ""))
-        b = mb.addButton("Open Windows Mic Settings", QMessageBox.AcceptRole)
-        mb.addButton("Close", QMessageBox.RejectRole)
-        mb.exec()
-        if mb.clickedButton() is b:
-            wake_word_detector.open_windows_mic_settings()
-
-
-class HomeTab(QWidget):
-    """ULTRON home: one master switch, live system status, voice assistant."""
-
-    def __init__(self, on_master_change=None):
-        super().__init__()
-        self.on_master_change = on_master_change
-        self._master_on = False
-        self._build()
-        QTimer.singleShot(400, self._refresh_status)
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(18)
-
-        # header
-        hdr = QHBoxLayout()
-        logo = QLabel("🔴")
-        logo.setStyleSheet("font-size: 26pt;")
-        hdr.addWidget(logo)
-        title = QLabel("ULTRON")
-        title.setStyleSheet("font-size: 24pt; font-weight: 800; color: #89b4fa;")
-        hdr.addWidget(title)
-        hdr.addStretch()
-        self.master_lbl = QLabel("SYSTEM OFF")
-        self.master_lbl.setStyleSheet("font-size: 11pt; font-weight: 700; color: #f38ba8;")
-        hdr.addWidget(self.master_lbl)
-        lay.addLayout(hdr)
-
-        # master power button
-        self.master_btn = QPushButton("⏻   TURN ULTRON ON")
-        self.master_btn.setMinimumHeight(78)
-        self.master_btn.setStyleSheet(
-            "font-size: 17pt; font-weight: 800; background: #313244; border: 2px solid #45475a; border-radius: 10px;")
-        self.master_btn.clicked.connect(self._toggle_master)
-        lay.addWidget(self.master_btn)
-
-        hint = QLabel("One switch starts everything: kernel, local LLM, voice assistant "
-                      "(mic + wake word 'Hey ULTRON'), image generation and all tools. "
-                      "Press Alt+` anywhere to arm voice listening.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #a6adc8;")
-        lay.addWidget(hint)
-
-        # status cards
-        cards = QHBoxLayout()
-        self.cards = {}
-        for key, label, icon in [
-            ("kernel", "Kernel", "🧠"),
-            ("model", "LLM Model", "💾"),
-            ("voice", "Voice", "🎤"),
-            ("image", "Image", "🎨"),
-            ("tools", "Tools", "🛠"),
-        ]:
-            c = QGroupBox("")
-            cl = QVBoxLayout(c)
-            cl.setContentsMargins(10, 10, 10, 10)
-            top = QLabel(f"{icon} {label}")
-            top.setStyleSheet("font-weight: 700;")
-            val = QLabel("…")
-            val.setStyleSheet("color: #a6adc8;")
-            cl.addWidget(top)
-            cl.addWidget(val)
-            cards.addWidget(c)
-            self.cards[key] = val
-        lay.addLayout(cards)
-
-        # voice assistant panel
-        vg = QGroupBox("🎤 Voice Assistant (Alt+`)")
-        vl = QVBoxLayout(vg)
-        self.voice_panel = VoiceAssistantPanel(self)
-        vl.addWidget(self.voice_panel)
-        lay.addWidget(vg)
-
-        lay.addStretch()
-
-    # ---------------- master switch ----------------
-    def _toggle_master(self):
-        if self._master_on:
-            self._master_off()
-        else:
-            self._master_on_seq()
-
-    def _master_on_seq(self):
-        self._master_on = True
-        self.master_btn.setText("⏻   ULTRON IS RUNNING — click to turn off")
-        self.master_btn.setStyleSheet(
-            "font-size: 15pt; font-weight: 800; background: #a6e3a1; color: #11111b;"
-            "border: 2px solid #a6e3a1; border-radius: 10px;")
-        self.master_lbl.setText("SYSTEM ON")
-        self.master_lbl.setStyleSheet("font-size: 11pt; font-weight: 700; color: #a6e3a1;")
-
-        # 1) kernel
-        def work():
-            kernel.initialize()
-            model_manager.initialize()
-            model_manager.load()
-            from ultron.voice.assistant import voice_assistant
-            voice_assistant.start()
-            from ultron.image import image_generator
-            image_generator.initialize()
-            return True
-
-        w = WorkerThread(work)
-        w.result.connect(lambda _: self._refresh_status())
-        w.error.connect(lambda e: QMessageBox.warning(self, "Startup issue", e[:300]))
-        w.start()
-        self._master_thread = w
-
-        if self.on_master_change:
-            try:
-                self.on_master_change(True)
-            except Exception:
-                pass
-        # 2) start the voice assistant engine (earns its "alexa-like" behaviour)
-        QTimer.singleShot(100, self.voice_panel.toggle_power)
-
-    def _master_off(self):
-        self._master_on = False
-        self.master_btn.setText("⏻   TURN ULTRON ON")
-        self.master_btn.setStyleSheet(
-            "font-size: 17pt; font-weight: 800; background: #313244; border: 2px solid #45475a; border-radius: 10px;")
-        self.master_lbl.setText("SYSTEM OFF")
-        self.master_lbl.setStyleSheet("font-size: 11pt; font-weight: 700; color: #f38ba8;")
-
-        def work():
-            try:
-                voice_assistant.stop()
-            except Exception:
-                pass
-            try:
-                kernel.shutdown()
-            except Exception:
-                pass
-            return True
-
-        w = WorkerThread(work)
-        w.result.connect(lambda _: self._refresh_status())
-        w.start()
-        self._master_thread = w
-
-        if self.on_master_change:
-            try:
-                self.on_master_change(False)
-            except Exception:
-                pass
-
-    def _refresh_status(self):
-        def val(key, text, color="#a6adc8"):
-            w = self.cards.get(key)
-            if w:
-                w.setText(text)
-                w.setStyleSheet(f"color: {color};")
-
-        if getattr(kernel, "_running", False):
-            val("kernel", "ready ✅", "#a6e3a1")
-        else:
-            val("kernel", "off", "#f38ba8")
-        try:
-            if model_manager.is_loaded():
-                val("model", "loaded ✅", "#a6e3a1")
-            else:
-                val("model", "not loaded", "#f9e2af")
-        except Exception:
-            val("model", "not loaded", "#f9e2af")
-
-        if voice_assistant.enabled:
-            val("voice", f"on ✅ ({voice_assistant.state.value})", "#a6e3a1")
-        else:
-            val("voice", "off", "#f38ba8")
-
-        try:
-            from ultron.image import image_generator
-            st = image_generator.get_status()
-            if st.get("diffusion_loaded"):
-                val("image", "diffusion ✅", "#a6e3a1")
-            else:
-                val("image", "procedural ✅", "#a6e3a1")
-        except Exception:
-            val("image", "unknown", "#f9e2af")
-
-        try:
-            n = len(tool_registry.get_all())
-            val("tools", f"{n} tools", "#a6e3a1")
-        except Exception:
-            val("tools", "unknown", "#f9e2af")
+    def _sync_state(self, state=None, data=None):
+        current = voice_assistant.state
+        error = voice_assistant.error if current == AssistantState.ERROR else None
+        self.hint_lbl.setText(error or self.STATE_TEXT[current])
+        self.listen_btn.setText("Disable voice" if voice_assistant.enabled else "Enable voice")
 
 
 # ==================================================================
@@ -503,7 +252,7 @@ class ChatTab(QWidget):
         header.addWidget(ttl)
         header.addStretch()
         self.ws_label = QLabel("Workspace: none")
-        self.ws_label.setStyleSheet("color: #a6adc8;")
+        self.ws_label.setStyleSheet("color: #c3adb2;")
         header.addWidget(self.ws_label)
         lay.addLayout(header)
 
@@ -516,9 +265,9 @@ class ChatTab(QWidget):
         btn = QPushButton("Browse")
         btn.clicked.connect(self._browse_ws)
         ws_row.addWidget(btn)
-        load_btn = QPushButton("Load & Index")
-        load_btn.clicked.connect(self._load_ws)
-        ws_row.addWidget(load_btn)
+        self.load_btn = QPushButton("Load & Index")
+        self.load_btn.clicked.connect(self._load_ws)
+        ws_row.addWidget(self.load_btn)
         lay.addLayout(ws_row)
         self.use_workspace = QCheckBox("Use selected folder context for chat")
         self.use_workspace.setEnabled(False)
@@ -530,7 +279,7 @@ class ChatTab(QWidget):
         # messages
         self.messages = QTextBrowser()
         self.messages.setOpenExternalLinks(True)
-        self.messages.setStyleSheet("background: #181825; border: 1px solid #313244; padding: 10px;")
+        self.messages.setStyleSheet("background: #130f12; border: 1px solid #452b33; padding: 10px;")
         lay.addWidget(self.messages, 1)
         self._append("assistant", "Hi! I'm ULTRON. Ask me anything about your workspace files, or type a command like 'open notepad'.")
 
@@ -567,16 +316,25 @@ class ChatTab(QWidget):
         if not p:
             QMessageBox.warning(self, "No folder", "Pick a folder first.")
             return
-        self.status.setText("Indexing workspace...")
+        self.load_btn.setEnabled(False)
+        self.status.setText("Building local search index...")
         def work():
-            ws = workspace_manager.create_workspace("ws", p, read_only=True)
-            workspace_manager.select_workspace(ws.workspace_id)
+            folder = Path(p).expanduser().resolve()
+            if not folder.is_dir():
+                return {"success": False, "error": "Select a folder that exists."}
+            ws = workspace_manager.create_workspace(folder.name or str(folder), str(folder), read_only=True)
             from ultron.workspace.analyzer import workspace_analyzer
-            return workspace_analyzer.index_workspace(ws.workspace_id)
+            workspace_manager.select_workspace(ws.workspace_id)
+            return {"workspace": ws.name, **workspace_analyzer.index_workspace(ws.workspace_id)}
         w = WorkerThread(work)
         def done(res):
+            self.load_btn.setEnabled(True)
+            if res.get("workspace"):
+                self.ws_label.setText(f"Workspace: {res['workspace']}")
             if not res.get("success"):
-                self.use_workspace.setEnabled(False)
+                if res.get("workspace"):
+                    self.use_workspace.setChecked(False)
+                    self.use_workspace.setEnabled(False)
                 self.status.setText("Indexing failed")
                 QMessageBox.warning(
                     self,
@@ -584,25 +342,30 @@ class ChatTab(QWidget):
                     res.get("error", "The folder could not be indexed."),
                 )
                 return
-            self.ws_label.setText(f"Workspace: {Path(p).name}")
             self.status.setText(f"Indexed: {res.get('chunks_indexed', 0)} chunks")
             self.use_workspace.setEnabled(True)
             self.use_workspace.setChecked(True)
-            QTimer.singleShot(1500, lambda: self.status.setText("Ready."))
+        def failed(error):
+            self.load_btn.setEnabled(True)
+            self.status.setText("Indexing failed")
+            QMessageBox.critical(self, "Index error", error.splitlines()[0])
         w.result.connect(done)
-        w.error.connect(lambda e: (self.status.setText("Error: " + e), QMessageBox.critical(self, "Index error", e[:500])))
+        w.error.connect(failed)
         w.start()
         self._index_thread = w
 
     def _append(self, role, text):
         ts = time.strftime("%H:%M:%S")
         if role == "user":
-            self.messages.append(f'<p style="color:#89b4fa;"><b>You</b> <span style="color:#6c7086">({ts})</span></p>')
+            self.messages.append(f'<p style="color:#ffaba0;"><b>You</b> <span style="color:#6c7086">({ts})</span></p>')
         else:
             self.messages.append(f'<p style="color:#a6e3a1;"><b>ULTRON</b> <span style="color:#6c7086">({ts})</span></p>')
-        self.messages.append(f'<p style="margin:0 0 12px 0;">{text.replace(chr(10), "<br>")}</p>')
+        self.messages.append(f'<p style="margin:0 0 12px 0;">{html.escape(text).replace(chr(10), "<br>")}</p>')
 
     def _send(self):
+        for thread in (getattr(self, "_gen_thread", None), getattr(self, "_img_thread", None)):
+            if thread and thread.isRunning():
+                return
         text = self.input.toPlainText().strip()
         if not text:
             return
@@ -624,27 +387,30 @@ class ChatTab(QWidget):
         lowered = text.lower()
         img_triggers = ("draw", "generate an image", "generate image", "picture of",
                         "image of", "create an image", "make a picture", "render")
-        if any(t in lowered for t in img_triggers):
+        if lowered.removeprefix("please ").startswith(img_triggers):
             prompt = self._strip_image_trigger(text)
             self._generate_image(prompt)
             return
 
+        use_workspace = self.use_workspace.isChecked()
+        workspace_id = workspace_manager.get_current_workspace_id()
         def work():
             from ultron.kernel import UltronRequest, RequestType
             request_type = RequestType.TEXT_COMMAND
-            if self.use_workspace.isChecked() and workspace_manager.get_current_workspace_id():
+            if use_workspace and workspace_id:
                 request_type = RequestType.WORKSPACE_QUERY
             r = UltronRequest(
                 request_id=f"req_{int(time.time()*1000)}",
                 request_type=request_type,
                 input_text=text,
-                workspace_id=workspace_manager.get_current_workspace_id(),
+                workspace_id=workspace_id,
             )
             return kernel.process(r)
         w = WorkerThread(work)
         def done(resp):
             self._append("assistant", resp.response_text)
-            self.status.setText("Ready.")
+            route = resp.metadata.get("route")
+            self.status.setText(route.title() if route else "Ready" if resp.success else "Request failed")
         w.result.connect(done)
         w.error.connect(lambda e: (self._append("assistant", "Error: " + e), self.status.setText("Error")))
         w.start()
@@ -684,8 +450,8 @@ class ChatTab(QWidget):
                 p = Path(res.path).resolve().as_uri()
                 self.messages.append(
                     f'<p style="margin:0 0 12px 0;">'
-                    f'<img src="{p}" style="max-width:520px;border-radius:8px;border:1px solid #313244;">'
-                    f'<br><a href="{p}" style="color:#89b4fa;">Open full size</a></p>')
+                    f'<img src="{p}" style="max-width:520px;border-radius:8px;border:1px solid #452b33;">'
+                    f'<br><a href="{p}" style="color:#ffaba0;">Open full size</a></p>')
                 if res.error:
                     self.messages.append(f'<p style="margin:0 0 12px 0;color:#fab387;">⚠ {res.error}</p>')
                 self.status.setText("Ready.")
@@ -718,7 +484,7 @@ class ImageTab(QWidget):
         lay.addWidget(t)
 
         self.backend_status = QLabel("Checking backend...")
-        self.backend_status.setStyleSheet("color: #a6adc8;")
+        self.backend_status.setStyleSheet("color: #c3adb2;")
         lay.addWidget(self.backend_status)
 
         # prompt
@@ -753,7 +519,7 @@ class ImageTab(QWidget):
         row = QHBoxLayout()
         self.gen_btn = QPushButton("✨ Generate")
         self.gen_btn.setStyleSheet(
-            "background: #89b4fa; color: #1e1e2e; font-weight: 800; font-size: 12pt; border-radius: 6px;")
+            "background: #ffaba0; color: #181316; font-weight: 800; font-size: 12pt; border-radius: 6px;")
         self.gen_btn.setMinimumHeight(48)
         self.gen_btn.setCursor(Qt.PointingHandCursor)
         self.gen_btn.clicked.connect(self._generate)
@@ -779,7 +545,7 @@ class ImageTab(QWidget):
         split = QSplitter(Qt.Horizontal)
         self.preview = QLabel("Your image appears here")
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setStyleSheet("background: #181825; border: 1px solid #313244; border-radius: 6px; color: #6c7086;")
+        self.preview.setStyleSheet("background: #130f12; border: 1px solid #452b33; border-radius: 6px; color: #6c7086;")
         self.preview.setMinimumWidth(400)
         self.history = QListWidget()
         self.history.setMaximumWidth(340)
@@ -791,7 +557,7 @@ class ImageTab(QWidget):
         lay.addWidget(split, 1)
 
         self.status = QLabel("")
-        self.status.setStyleSheet("color: #a6adc8;")
+        self.status.setStyleSheet("color: #c3adb2;")
         lay.addWidget(self.status)
 
     # ------------------------------------------------------------------
@@ -847,7 +613,7 @@ class ImageTab(QWidget):
         if busy:
             self.gen_btn.setText(text or "✨ Generating…")
             self.gen_btn.setStyleSheet(
-                "background: #fab387; color: #1e1e2e; font-weight: 800; font-size: 12pt; border-radius: 6px;")
+                "background: #fab387; color: #181316; font-weight: 800; font-size: 12pt; border-radius: 6px;")
             self.progress.show()
             self.progress.setRange(0, 0)  # indeterminate
             self._pulse_val = 0
@@ -855,7 +621,7 @@ class ImageTab(QWidget):
         else:
             self.gen_btn.setText("✨ Generate")
             self.gen_btn.setStyleSheet(
-                "background: #89b4fa; color: #1e1e2e; font-weight: 800; font-size: 12pt; border-radius: 6px;")
+                "background: #ffaba0; color: #181316; font-weight: 800; font-size: 12pt; border-radius: 6px;")
             self.progress.hide()
             self.progress.setRange(0, 1)
             self._pulse_timer.stop()
@@ -920,10 +686,14 @@ class ImageTab(QWidget):
 # ==================================================================
 
 class VoiceTab(QWidget):
-    def __init__(self, chat_tab=None):
+    def __init__(self):
         super().__init__()
-        self.chat_tab = chat_tab
-        self._wake = None
+        self._ptt_active = False
+        self._mic_settings = QSettings("ULTRON", "Control Center")
+        name = self._mic_settings.value("microphone/name", "", type=str)
+        host = self._mic_settings.value("microphone/host", "", type=str)
+        voice_assistant.input_device = (name, host) if name and host else None
+        self._listed_microphones = False
         self._build()
 
     def _build(self):
@@ -938,14 +708,27 @@ class VoiceTab(QWidget):
         st = QGroupBox("Status")
         stl = QVBoxLayout(st)
         self.status_lbl = QLabel("🔴 not initialized")
-        self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #a6adc8;")
+        self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #c3adb2;")
         stl.addWidget(self.status_lbl)
         init_btn = QPushButton("▶ Start Voice Engine")
         init_btn.clicked.connect(self._initialize_voice)
         stl.addWidget(init_btn)
-        diag_btn = QPushButton("🔍 Diagnose Microphone (Windows permission)")
-        diag_btn.clicked.connect(self._diagnose_mic)
-        stl.addWidget(diag_btn)
+        mic_row = QHBoxLayout()
+        mic_row.addWidget(QLabel("Microphone"))
+        self.input_devices = QComboBox()
+        self.input_devices.addItem("Windows default input")
+        self.input_devices.currentIndexChanged.connect(self._select_microphone)
+        mic_row.addWidget(self.input_devices, 1)
+        self.refresh_mics = QPushButton("Refresh inputs")
+        self.refresh_mics.clicked.connect(self._load_microphones)
+        mic_row.addWidget(self.refresh_mics)
+        self.test_mic = QPushButton("Test microphone")
+        self.test_mic.clicked.connect(self._test_microphone)
+        mic_row.addWidget(self.test_mic)
+        stl.addLayout(mic_row)
+        self.mic_status = QLabel("Choose an input and use Test microphone to check whether it picks up speech.")
+        self.mic_status.setWordWrap(True)
+        stl.addWidget(self.mic_status)
         lay.addWidget(st)
 
         ctrl = QGroupBox("Controls")
@@ -957,10 +740,9 @@ class VoiceTab(QWidget):
         self.ptt.released.connect(self._ptt_off)
         cl.addWidget(self.ptt)
 
-        self.wake_check = QCheckBox("Always listen for 'Hey ULTRON' (hands-free)")
-        self.wake_check.setEnabled(False)
-        self.wake_check.toggled.connect(self._toggle_wake)
-        cl.addWidget(self.wake_check)
+        wake_button = QPushButton("Arm 'Hey ULTRON'")
+        wake_button.clicked.connect(self._arm_wake)
+        cl.addWidget(wake_button)
         lay.addWidget(ctrl)
 
         sets = QGroupBox("Voice Settings")
@@ -968,9 +750,9 @@ class VoiceTab(QWidget):
         self.tts_voice = QComboBox()
         self.tts_voice.addItems(["en_US-lessac-medium", "en_US-ryan-high", "System David"])
         sl.addRow("TTS Voice:", self.tts_voice)
-        self.stt_model = QComboBox()
-        self.stt_model.addItems(["base.en (fast)", "tiny.en (faster)"])
-        sl.addRow("STT Model:", self.stt_model)
+        from ultron.voice.stt import provider_name
+        sl.addRow("Speech recognition", QLabel(provider_name()))
+        sl.addRow("", QLabel("Wake listening sends detected speech to the selected provider to check for “Hey ULTRON”."))
         self.speak_replies = QCheckBox("Speak replies out loud")
         self.speak_replies.setChecked(True)
         sl.addRow("", self.speak_replies)
@@ -990,30 +772,20 @@ class VoiceTab(QWidget):
 
     # ---------------- init ----------------
     def _initialize_voice(self):
-        self.status_lbl.setText("🟡 Loading STT + TTS...")
+        self.status_lbl.setText("🟡 Checking voice setup...")
         self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #f9e2af;")
 
         def work():
-            from ultron.voice.pipeline import voice_pipeline
-            voice_pipeline.initialize()
-            voice_pipeline.start(self._on_voice_text)
-            # wake word model (optional, loaded lazily)
-            try:
-                from ultron.voice.wake_word import wake_word_detector
-                wake_word_detector.initialize()
-            except Exception:
-                pass
-            return voice_pipeline.is_ready()
+            return None if voice_assistant.start() else voice_assistant.error or "Voice input is unavailable."
 
         w = WorkerThread(work)
-        def done(ok):
-            if ok:
-                self.status_lbl.setText("🟢 Ready — hold 'Hold to Speak'")
-                self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #a6e3a1;")
-                self.wake_check.setEnabled(True)
-            else:
-                self.status_lbl.setText("🔴 STT model failed to load")
+        def done(error):
+            if error:
+                self.status_lbl.setText("🔴 " + error)
                 self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #f38ba8;")
+            else:
+                self.status_lbl.setText("🟢 Listening for 'Hey ULTRON'.")
+                self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #a6e3a1;")
         def err(e):
             self.status_lbl.setText("🔴 Error: " + e[:120])
             self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #f38ba8;")
@@ -1022,134 +794,117 @@ class VoiceTab(QWidget):
         w.start()
         self._init_thread = w
 
-    def _on_voice_text(self, text: str):
-        """Voice transcripts land in the Chat tab so everything is one system."""
-        if self.chat_tab is not None:
-            try:
-                self.chat_tab.submit_external_text(text)
-            except Exception:
-                pass
-
     # ---------------- push to talk ----------------
     def _ptt_on(self):
-        self.status_lbl.setText("🎤 Listening...")
-        self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #fab387;")
-        try:
-            from ultron.voice.pipeline import voice_pipeline
-            if not voice_pipeline.is_ready():
-                QMessageBox.warning(self, "Voice not ready",
-                                    "Start the Voice Engine first (top of this tab).")
-                return
-            voice_pipeline.push_to_talk_start()
-        except Exception as e:
-            QMessageBox.critical(self, "Mic error", str(e)[:300])
+        self._ptt_active = voice_assistant.start_push_to_talk(speak_reply=self.speak_replies.isChecked())
+        if self._ptt_active:
+            self.status_lbl.setText("🎤 Listening...")
+            self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #fab387;")
+        else:
+            self.status_lbl.setText("🔴 " + (voice_assistant.error or
+                                    "Could not start recording. Check the voice engine and microphone."))
 
     def _ptt_off(self):
+        if not self._ptt_active:
+            return
+        self._ptt_active = False
         self.status_lbl.setText("🟡 Transcribing...")
-        self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #f9e2af;")
-
         def work():
-            from ultron.voice.pipeline import voice_pipeline
-            return voice_pipeline.push_to_talk_stop()
+            return voice_assistant.stop_push_to_talk()
 
         w = WorkerThread(work)
         def done(text):
-            if text:
-                self.status_lbl.setText("🟢 Heard: " + text[:60])
-                self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #a6e3a1;")
-                try:
-                    from ultron.voice.assistant import voice_assistant
-                    voice_assistant.start()
-                    voice_assistant.handle_transcript(text, speak_reply=self.speak_replies.isChecked())
-                except Exception as e:
-                    self.status_lbl.setText("🔴 Command error: " + str(e)[:80])
-            else:
-                self.status_lbl.setText("🔴 Idle — nothing heard")
-                self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #a6adc8;")
-        def err(e):
-            self.status_lbl.setText("🔴 " + e[:100])
-            if "mic" in e.lower() or "input" in e.lower():
-                self._show_mic_block()
+            self.status_lbl.setText("🟢 Heard: " + text[:60] if text else voice_assistant.error or "No speech detected")
+            self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #c3adb2;")
+        def err(error):
+            self.status_lbl.setText("🔴 " + error.splitlines()[0])
+            self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #f38ba8;")
         w.result.connect(done)
         w.error.connect(err)
         w.start()
         self._ptt_thread = w
 
-    # ---------------- wake word ----------------
-    def _toggle_wake(self, on: bool):
-        from ultron.voice.wake_word import wake_word_detector
-        if on:
-            if not wake_word_detector.available and not wake_word_detector.initialize():
-                self._show_mic_block(wake_word_detector.error)
-                self.wake_check.setChecked(False)
-                return
-            def on_wake():
-                self.status_lbl.setText("🟡 Wake word! Listening...")
-                self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #f9e2af;")
-                try:
-                    from ultron.voice.pipeline import voice_pipeline
-                    voice_pipeline.push_to_talk_start()
-                except Exception:
-                    pass
-            wake_word_detector.start(on_wake)
-            self.status_lbl.setText("🟢 Hands-free: say 'Hey ULTRON'")
-            self.status_lbl.setStyleSheet("font-size: 12pt; font-weight: 600; color: #a6e3a1;")
+    def _arm_wake(self):
+        if voice_assistant.arm():
+            self.status_lbl.setText("Say 'Hey ULTRON' followed by your command. See Home for the reply.")
         else:
-            wake_word_detector.stop()
-            self.status_lbl.setText("🔴 Hands-free off")
+            self.status_lbl.setText(voice_assistant.error or "Voice assistant could not start.")
 
-    # ---------------- diagnostics ----------------
-    def _diagnose_mic(self):
-        try:
-            from ultron.voice.wake_word import wake_word_detector
-            info = wake_word_detector.diagnose_microphone()
-        except Exception as e:
-            QMessageBox.critical(self, "Diagnostics failed", str(e)[:300])
-            return
-        devs = "\n".join(f"  • {d}" for d in info.get("devices", [])) or "  (none found)"
-        msg = f"PyAudio available: {info.get('available')}\nInput devices:\n{devs}\n"
-        if info.get("blocked"):
-            msg += "\n⛔ " + info.get("message", "Access blocked")
-            mb = QMessageBox(self)
-            mb.setIcon(QMessageBox.Warning)
-            mb.setWindowTitle("Microphone blocked by Windows")
-            mb.setText(msg)
-            open_btn = mb.addButton("Open Windows Mic Settings", QMessageBox.AcceptRole)
-            mb.addButton("Close", QMessageBox.RejectRole)
-            mb.exec()
-            if mb.clickedButton() is open_btn:
-                try:
-                    from ultron.voice.wake_word import wake_word_detector
-                    wake_word_detector.open_windows_mic_settings()
-                except Exception:
-                    pass
-        else:
-            QMessageBox.information(self, "Microphone OK", msg)
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._listed_microphones:
+            self._listed_microphones = True
+            self._load_microphones()
 
-    def _show_mic_block(self, detail: str = ""):
-        mb = QMessageBox(self)
-        mb.setIcon(QMessageBox.Warning)
-        mb.setWindowTitle("Microphone blocked")
-        mb.setText("Windows is blocking microphone access.\n\n"
-                   "Settings > Privacy & security > Microphone > "
-                   "'Let desktop apps access the microphone'.\n\n"
-                   + (detail or ""))
-        b = mb.addButton("Open Windows Mic Settings", QMessageBox.AcceptRole)
-        mb.addButton("Close", QMessageBox.RejectRole)
-        mb.exec()
-        if mb.clickedButton() is b:
-            try:
-                from ultron.voice.wake_word import wake_word_detector
-                wake_word_detector.open_windows_mic_settings()
-            except Exception:
-                pass
+    def _load_microphones(self):
+        self.refresh_mics.setEnabled(False)
+
+        def done(choices):
+            selected = voice_assistant.input_device
+            self.input_devices.blockSignals(True)
+            self.input_devices.clear()
+            self.input_devices.addItem("Windows default input")
+            for name, host in choices:
+                self.input_devices.addItem(f"{name} — {host}", [name, host])
+            index = self.input_devices.findData(list(selected)) if selected else 0
+            if index < 0:
+                self.input_devices.addItem(f"{selected[0]} — unavailable", list(selected))
+                index = self.input_devices.count() - 1
+            self.input_devices.setCurrentIndex(index)
+            self.input_devices.blockSignals(False)
+            self.refresh_mics.setEnabled(True)
+
+        def failed(error):
+            self.refresh_mics.setEnabled(True)
+            self.mic_status.setText(error.splitlines()[0])
+
+        self._microphone_list_worker = WorkerThread(voice_assistant.microphone_choices)
+        self._microphone_list_worker.result.connect(done)
+        self._microphone_list_worker.error.connect(failed)
+        self._microphone_list_worker.start()
+
+    def _select_microphone(self):
+        selected = self.input_devices.currentData()
+        if voice_assistant.state == AssistantState.ARMED:
+            voice_assistant.disarm()
+        voice_assistant.input_device = tuple(selected) if selected else None
+        name, host = selected if selected else ("", "")
+        self._mic_settings.setValue("microphone/name", name)
+        self._mic_settings.setValue("microphone/host", host)
+        self.mic_status.setText("Input selected. Test the microphone or use Hold to Speak.")
+
+    def _test_microphone(self):
+        if voice_assistant.state == AssistantState.ARMED:
+            voice_assistant.disarm()
+        self.test_mic.setEnabled(False)
+        self.input_devices.setEnabled(False)
+        self.mic_status.setText("Speak now. This test stays on your computer.")
+
+        def show_result(message):
+            self.mic_status.setText(message)
+            self.input_devices.setEnabled(True)
+            self.test_mic.setEnabled(True)
+
+        def done(result):
+            samples, peak = result
+            if not samples:
+                message = "This input sent no audio. Try the built-in Microphone Array or another input."
+            elif peak < 0.01:
+                message = "Windows sent audio, but the signal was very quiet. Check the microphone mute and input volume."
+            else:
+                message = f"Microphone picked up sound (peak {peak:.0%}). Try Hold to Speak."
+            show_result(message)
+
+        self._microphone_test_worker = WorkerThread(voice_assistant.test_microphone)
+        self._microphone_test_worker.result.connect(done)
+        self._microphone_test_worker.error.connect(lambda error: show_result(error.splitlines()[0]))
+        self._microphone_test_worker.start()
 
     # ---------------- tts ----------------
     def _speak(self):
         txt = self.test_input.text().strip() or "ULTRON voice test"
         def work():
-            from ultron.voice.pipeline import voice_pipeline
-            return voice_pipeline.speak(txt)
+            return voice_assistant.speak(txt, block=True)
         w = WorkerThread(work)
         w.error.connect(lambda e: QMessageBox.critical(self, "TTS error", e[:300]))
         w.start()
@@ -1170,36 +925,36 @@ class AutomationTab(QWidget):
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
 
-        t = QLabel("🤖 Automation — workflows & schedules")
+        t = QLabel("Automation workflows")
         t.setStyleSheet("font-size: 15pt; font-weight: 700;")
         lay.addWidget(t)
 
         # quick natural language
         ql = QGroupBox("Quick Command")
         qv = QVBoxLayout(ql)
-        qv.addWidget(QLabel("Type naturally, e.g.: 'study schedule from today 5-6pm'"))
+        qv.addWidget(QLabel("Run a task, ask about an indexed folder, or explicitly use Chrome."))
         row = QHBoxLayout()
         self.quick = QLineEdit()
-        self.quick.setPlaceholderText("study schedule from today 5-6pm")
+        self.quick.setPlaceholderText("Open Chrome and ask ChatGPT what ROS is")
         row.addWidget(self.quick)
-        run = QPushButton("Execute")
-        run.clicked.connect(self._run_quick)
-        row.addWidget(run)
+        self.run_button = QPushButton("Run workflow")
+        self.run_button.clicked.connect(self._run_quick)
+        self.quick.returnPressed.connect(self._run_quick)
+        row.addWidget(self.run_button)
         qv.addLayout(row)
         lay.addWidget(ql)
 
-        examples = QGroupBox("Example Automations (non-calendar)")
+        examples = QGroupBox("Workflow presets")
         examples_layout = QVBoxLayout(examples)
         examples_layout.addWidget(QLabel(
             "Choose an example to load it into Quick Command, then review and execute it."
         ))
         example_buttons = [
             ("Create task", "Create a high priority task to review project documentation"),
-            ("Set reminder", "Remind me in 30 minutes to check the build"),
-            ("Run tests", "Run the tests in the current workspace"),
-            ("Check Git", "Show the current Git status"),
-            ("Analyze code", "Analyze the main Python files in the current workspace"),
-            ("Explain file", "Explain what the selected workspace code file does"),
+            ("List tasks", "List my tasks"),
+            ("Describe folder", "Tell me about this folder"),
+            ("Ask ChatGPT", "Open Chrome and ask ChatGPT what ROS is"),
+            ("Search the web", "Search the web for ROS documentation"),
         ]
         examples_row = QHBoxLayout()
         for label, command in example_buttons:
@@ -1208,6 +963,12 @@ class AutomationTab(QWidget):
             examples_row.addWidget(button)
         examples_layout.addLayout(examples_row)
         lay.addWidget(examples)
+
+        self.workflow_result = QPlainTextEdit()
+        self.workflow_result.setReadOnly(True)
+        self.workflow_result.setPlaceholderText("Workflow output appears here.")
+        self.workflow_result.setMaximumHeight(150)
+        lay.addWidget(self.workflow_result)
 
         # tasks list
         tl = QGroupBox("Tasks / Reminders")
@@ -1234,22 +995,35 @@ class AutomationTab(QWidget):
 
     def _run_quick(self):
         text = self.quick.text().strip()
-        if not text:
+        if not text or not self.run_button.isEnabled():
             return
+        self.run_button.setEnabled(False)
+        self.workflow_result.setPlainText("Running workflow…")
+
         def work():
             from ultron.kernel import UltronRequest, RequestType
-            r = UltronRequest(
+            kernel.initialize(start_voice=False)
+            request = UltronRequest(
                 request_id=f"req_{int(time.time()*1000)}",
                 request_type=RequestType.TEXT_COMMAND,
                 input_text=text,
                 workspace_id=workspace_manager.get_current_workspace_id(),
             )
-            return kernel.process(r)
-        w = WorkerThread(work)
-        w.result.connect(lambda resp: QMessageBox.information(self, "Executed", resp.response_text[:300]))
-        w.error.connect(lambda e: QMessageBox.critical(self, "Error", e[:300]))
-        w.start()
-        self._quick_thread = w
+            return kernel.process(request)
+
+        def display(message):
+            self.workflow_result.setPlainText(message)
+            self.run_button.setEnabled(True)
+
+        def done(response):
+            route = response.metadata.get("route")
+            display(f"{route.title()}\n\n{response.response_text}" if route else response.response_text)
+            self._refresh_tasks()
+
+        self._quick_thread = WorkerThread(work)
+        self._quick_thread.result.connect(done)
+        self._quick_thread.error.connect(lambda error: display(error.splitlines()[0]))
+        self._quick_thread.start()
 
     def _refresh_tasks(self):
         try:
@@ -1280,6 +1054,9 @@ class AutomationTab(QWidget):
 # ==================================================================
 
 class MonitorTab(QWidget):
+    earthquakes_loaded = Signal(object)
+    earthquake_failed = Signal(str)
+
     def __init__(self):
         super().__init__()
         self._build()
@@ -1293,7 +1070,7 @@ class MonitorTab(QWidget):
         mt.setStyleSheet("font-size: 15pt; font-weight: 700;")
         lay.addWidget(mt)
         self.status = QLabel("Ready. Fetch live news/environment below.")
-        self.status.setStyleSheet("color: #a6adc8;")
+        self.status.setStyleSheet("color: #c3adb2;")
         lay.addWidget(self.status)
 
         btns = QHBoxLayout()
@@ -1308,7 +1085,7 @@ class MonitorTab(QWidget):
         lay.addLayout(btns)
 
         self.output = QTextBrowser()
-        self.output.setStyleSheet("background: #181825; border: 1px solid #313244; padding: 8px;")
+        self.output.setStyleSheet("background: #130f12; border: 1px solid #452b33; padding: 8px;")
         lay.addWidget(self.output, 1)
 
     def _news(self):
@@ -1339,8 +1116,8 @@ class MonitorTab(QWidget):
     def _render_news(self, evs):
         evs = sorted(evs, key=lambda event: event.published, reverse=True)
         parts = [
-            "<h3 style='color:#89b4fa'>Live News Headlines</h3>",
-            "<p style='color:#a6adc8'>Updated just now from public RSS feeds.</p>",
+            "<h3 style='color:#ffaba0'>Live News Headlines</h3>",
+            "<p style='color:#c3adb2'>Updated just now from public RSS feeds.</p>",
         ]
         if not evs:
             parts.append("<i>No headlines were returned. Try Refresh News again.</i>")
@@ -1355,41 +1132,47 @@ class MonitorTab(QWidget):
                 timestamp = published.strftime("%Y-%m-%d %H:%M UTC") if published else "Time unavailable"
                 parts.append(
                     f"<li style='margin-bottom:10px'>"
-                    f"<a href='{url}' style='color:#cdd6f4'><b>{title}</b></a><br>"
-                    f"<small style='color:#89b4fa'>{source} | {timestamp}</small><br>"
-                    f"<span style='color:#a6adc8'>{summary}</span></li>"
+                    f"<a href='{url}' style='color:#f3e6e7'><b>{title}</b></a><br>"
+                    f"<small style='color:#ffaba0'>{source} | {timestamp}</small><br>"
+                    f"<span style='color:#c3adb2'>{summary}</span></li>"
                 )
             parts.append("</ol>")
         self.output.setHtml("".join(parts))
         self.status.setText(f"Loaded {len(evs)} live headlines")
 
     def _disasters(self):
+        if getattr(self, "_q", None) and self._q.isRunning():
+            return
         self.status.setText("Fetching earthquake data (USGS)...")
-        def work():
-            import requests
-            r = requests.get(
-                "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_hour.geojson",
-                timeout=20,
-            )
-            return r.json().get("features", [])
-        w = WorkerThread(work)
-        w.result.connect(self._render_eq)
-        w.error.connect(lambda e: self.status.setText("Quake error: " + e[:150]))
-        w.start()
-        self._q = w
 
-    def _render_eq(self, feats):
-        if not feats:
-            self.output.setHtml("<i>No significant earthquakes in the last hour.</i>")
+        def work():
+            url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson"
+            with urlopen(url, timeout=10) as response:
+                return json.load(response).get("features", [])
+
+        def failed(error):
+            self.status.setText("Earthquake feed unavailable")
+            self.earthquake_failed.emit(error)
+
+        self._q = WorkerThread(work)
+        self._q.result.connect(self._render_eq)
+        self._q.error.connect(failed)
+        self._q.start()
+
+    def _render_eq(self, features):
+        self.earthquakes_loaded.emit(features)
+        if not features:
+            self.output.setHtml("<i>No magnitude 2.5+ earthquakes reported in the past 24 hours.</i>")
             self.status.setText("No significant events")
             return
-        html = "<h3 style='color:#fab387'>⚠️ Significant Earthquakes (last hour)</h3><ul>"
-        for f in feats[:15]:
-            p = f["properties"]
-            html += f"<li>M{p['mag']} — {p['place']} <span style='color:#6c7086'>({datetime.fromtimestamp(p['time']/1000):%H:%M UTC})</span></li>"
-        html += "</ul>"
-        self.output.setHtml(html)
-        self.status.setText(f"{len(feats)} significant events")
+        parts = ["<h3>Earthquakes of magnitude 2.5+ (past 24 hours)</h3><ul>"]
+        for feature in features[:15]:
+            event = feature.get("properties") or {}
+            place = html.escape(str(event.get("place") or "Unknown location"))
+            magnitude = html.escape(str(event.get("mag") or "—"))
+            parts.append(f"<li>M{magnitude} · {place}</li>")
+        self.output.setHtml("".join(parts) + "</ul>")
+        self.status.setText(f"{len(features)} earthquake events")
 
     def _weather(self):
         lat, ok1 = QInputDialog.getDouble(self, "Latitude", "Lat:", 40.7128)
@@ -1409,7 +1192,7 @@ class MonitorTab(QWidget):
         self._w = w
 
     def _render_weather(self, periods):
-        html = "<h3 style='color:#89b4fa'>🌤 NOAA/NWS Forecast</h3>"
+        html = "<h3 style='color:#ffaba0'>🌤 NOAA/NWS Forecast</h3>"
         for p in periods:
             html += f"<p><b>{p['name']}</b>: {p['temperature']}°{p['temperatureUnit']} — {p['shortForecast']}</p>"
         self.output.setHtml(html)
@@ -1434,9 +1217,9 @@ class PermissionsTab(QWidget):
         pt.setStyleSheet("font-size: 15pt; font-weight: 700;")
         lay.addWidget(pt)
 
-        info = QLabel("Windows blocks unsigned apps by default. Instead of bypassing Windows, grant ULTRON permission here. Nothing runs until you allow it.")
+        info = QLabel("Select the apps ULTRON may open, then save. Changes take effect on the next command.")
         info.setWordWrap(True)
-        info.setStyleSheet("color: #a6adc8;")
+        info.setStyleSheet("color: #c3adb2;")
         lay.addWidget(info)
 
         # apps
@@ -1447,7 +1230,7 @@ class PermissionsTab(QWidget):
         for exe, friendly in APPS:
             row = QHBoxLayout()
             c = QCheckBox(friendly)
-            c.setChecked(not perms["apps"].get(exe, False))  # default denied
+            c.setChecked(perms.get("apps", {}).get(exe) is True)
             self.app_checks[exe] = c
             row.addWidget(c)
             row.addStretch()
@@ -1644,25 +1427,37 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ULTRON Control Center")
-        self.setMinimumSize(1150, 780)
-        self.resize(1320, 860)
+        self.setMinimumSize(1050, 700)
+        self.resize(1450, 900)
 
-        chat = ChatTab()
-        self.home = HomeTab()
-        tabs = QTabWidget()
-        tabs.addTab(self.home, "🏠 Home")
-        tabs.addTab(chat, "💬 Chat")
-        tabs.addTab(VoiceTab(chat), "🎤 Voice")
-        tabs.addTab(ImageTab(), "🎨 Image")
-        tabs.addTab(AutomationTab(), "🤖 Automation")
-        tabs.addTab(MonitorTab(), "🌍 Monitor")
-        tabs.addTab(PermissionsTab(), "🔐 Permissions")
-        tabs.addTab(ModulesTab(), "🔧 Modules")
-        tabs.addTab(SettingsTab(), "⚙ Settings")
-        self.tabs = tabs
-        self.setCentralWidget(tabs)
+        self.voice_panel = VoiceAssistantPanel()
+        self.automation = AutomationTab()
+        self.chat = ChatTab()
+        self.monitor = MonitorTab()
+        self._services_enabled = False
+        self.home = CommandCenter(self.voice_panel, self.open_view, self._add_task, self._toggle_services,
+                                  self._refresh_events, self._refresh_markets)
+        self.monitor.earthquakes_loaded.connect(self.home.show_events)
+        self.monitor.earthquake_failed.connect(self._show_event_error)
+        pages = (
+            ("◈", "Command center", self.home),
+            ("◫", "Chat", self.chat),
+            ("◉", "Voice", VoiceTab()),
+            ("▧", "Image", ImageTab()),
+            ("◇", "Automation", self.automation),
+            ("▥", "Monitor", self.monitor),
+            ("⊙", "Permissions", PermissionsTab()),
+            ("▦", "Modules", ModulesTab()),
+            ("⚙", "Settings", SettingsTab()),
+        )
+        self.shell = CommandShell(pages, self._start_hold_voice, self._stop_hold_voice,
+                                  self._on_voice_hotkey, self._send_from_overview)
+        self.setCentralWidget(self.shell)
+        self.voice_panel.state_changed.connect(self._update_voice_status)
+        self._update_voice_status()
 
         # Alt+` is handled as a real press/release push-to-talk key.
+        self._holding_voice_shortcut = False
         try:
             self._hotkey_hint = QShortcut(QKeySequence("Alt+Shift+V"), self, self._on_voice_hotkey,
                                           context=Qt.ApplicationShortcut)
@@ -1678,7 +1473,7 @@ class MainWindow(QMainWindow):
         self.tray.setToolTip("ULTRON Control Center")
         tm = QMenu()
         tm.addAction("Show", self.showNormal)
-        tm.addAction("Voice mode (Alt+`)", self._on_voice_hotkey)
+        tm.addAction("Arm 'Hey ULTRON' (Alt+Shift+V)", self._on_voice_hotkey)
         tm.addAction("Quit", self._quit)
         self.tray.setContextMenu(tm)
         self.tray.show()
@@ -1689,41 +1484,124 @@ class MainWindow(QMainWindow):
         # init kernel in background
         QTimer.singleShot(200, self._init_kernel)
 
+    def _send_from_overview(self, text):
+        for thread in (getattr(self.chat, "_gen_thread", None), getattr(self.chat, "_img_thread", None)):
+            if thread and thread.isRunning():
+                self.statusBar().showMessage("Wait for the current chat request to finish.", 5000)
+                return False
+        self.open_view("Chat")
+        self.chat.submit_external_text(text)
+        return True
+
+    def _refresh_events(self):
+        self.home.events_button.setEnabled(False)
+        self.home.event_status.setText("Refreshing USGS events…")
+        self.monitor._disasters()
+
+    def _show_event_error(self, error):
+        self.home.events_button.setEnabled(True)
+        self.home.event_status.setText("USGS refresh failed")
+
+    def _refresh_markets(self):
+        self.home.market_button.setEnabled(False)
+        self.home.market_status.setText("Refreshing CoinGecko…")
+
+        def work():
+            url = (
+                "https://api.coingecko.com/api/v3/simple/price"
+                "?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true"
+            )
+            with urlopen(url, timeout=8) as response:
+                data = json.load(response)
+            quotes = {}
+            for pair, asset in zip(self.home.market_pairs, ("bitcoin", "ethereum", "solana")):
+                try:
+                    price, change = float(data[asset]["usd"]), float(data[asset]["usd_24h_change"])
+                    if price > 0 and isfinite(price) and isfinite(change):
+                        quotes[pair] = (price, change)
+                except (ValueError, KeyError, TypeError):
+                    continue
+            return quotes
+
+        self._market_worker = WorkerThread(work)
+        self._market_worker.result.connect(self.home.show_quotes)
+        self._market_worker.error.connect(lambda _: self.home.show_quotes({}))
+        self._market_worker.start()
+
+    def open_view(self, name):
+        self.shell.open_view(name)
+
+    def _add_task(self):
+        self.automation._add_task()
+        self.home.refresh()
+
+    def _toggle_services(self):
+        enable = not self._services_enabled
+        control = self.home.services_button
+        control.setEnabled(False)
+        control.setText("Starting…" if enable else "Stopping…")
+
+        def work():
+            if enable:
+                from ultron.image import image_generator
+                kernel.initialize(start_voice=False)
+                model_manager.initialize()
+                model_manager.load()
+                image_generator.initialize()
+                voice_assistant.start()
+            else:
+                voice_assistant.stop()
+                kernel.shutdown()
+
+        def done():
+            control.setEnabled(True)
+            control.setText("Stop services" if self._services_enabled else "Start services")
+            self.home.refresh()
+
+        def success(_):
+            self._services_enabled = enable
+            done()
+
+        def failed(error):
+            done()
+            self.statusBar().showMessage(error.splitlines()[0], 8000)
+
+        self._service_worker = WorkerThread(work)
+        self._service_worker.result.connect(success)
+        self._service_worker.error.connect(failed)
+        self._service_worker.start()
+
+    def _update_voice_status(self, state=None, data=None):
+        self.shell.voice_status.setText(self.voice_panel.STATE_TEXT[voice_assistant.state])
+        self.home.refresh()
+
     def _on_voice_hotkey(self):
         """Arm hands-free wake-word mode for tray and the alternate shortcut."""
-        panel = getattr(self.home, "voice_panel", None)
-        if panel is None:
-            return
-        panel.arm_listen()
-        self.statusBar().showMessage("Voice assistant armed — say 'Hey ULTRON' + command")
+        self.voice_panel.arm_listen()
+        if voice_assistant.state == AssistantState.ARMED:
+            self.statusBar().showMessage("Voice assistant armed. Say 'Hey ULTRON' followed by your command.")
+        else:
+            self.statusBar().showMessage(voice_assistant.error or "Could not arm voice input.")
 
     def _start_hold_voice(self):
-        panel = getattr(self.home, "voice_panel", None)
-        if panel is None:
-            return
         if not voice_assistant.start_push_to_talk():
-            self.statusBar().showMessage("Voice assistant could not start recording")
-            return
-        panel._sync_state()
-        st = voice_assistant.state.value
-        self.statusBar().showMessage(f"Voice assistant: {st} — release Alt+` when finished")
-        self.tray.showMessage("ULTRON", "Listening — release Alt+` when finished",
-                              QSystemTrayIcon.Information, 2500)
+            message = "Voice input is already busy." if voice_assistant.enabled else "Voice input could not start."
+            self.statusBar().showMessage(voice_assistant.error or message)
+            return False
+        self.voice_panel._sync_state()
+        self.statusBar().showMessage("Recording. Release to transcribe.")
+        return True
 
     def _stop_hold_voice(self):
-        panel = getattr(self.home, "voice_panel", None)
-        if panel is None:
-            return
-
         def work():
             return voice_assistant.stop_push_to_talk()
 
         def done(text):
-            panel._sync_state()
+            self.voice_panel._sync_state()
             if text:
                 self.statusBar().showMessage(f"Heard: {text[:100]}")
             else:
-                self.statusBar().showMessage("No speech detected")
+                self.statusBar().showMessage(voice_assistant.error or "No speech detected")
 
         w = WorkerThread(work)
         w.result.connect(done)
@@ -1732,16 +1610,15 @@ class MainWindow(QMainWindow):
         self._voice_hold_thread = w
 
     def eventFilter(self, watched, event):
-        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease):
-            text = event.text()
-            alt_down = bool(event.modifiers() & Qt.AltModifier)
-            if alt_down and text in ("`", "~"):
-                if event.type() == QEvent.KeyPress and not event.isAutoRepeat():
-                    self._start_hold_voice()
-                    return True
-                if event.type() == QEvent.KeyRelease and not event.isAutoRepeat():
-                    self._stop_hold_voice()
-                    return True
+        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease) and not event.isAutoRepeat():
+            grave_key = event.key() in (Qt.Key_QuoteLeft, Qt.Key_AsciiTilde)
+            if event.type() == QEvent.KeyPress and grave_key and event.modifiers() & Qt.AltModifier:
+                self._holding_voice_shortcut = self._start_hold_voice()
+                return True
+            if event.type() == QEvent.KeyRelease and grave_key and self._holding_voice_shortcut:
+                self._holding_voice_shortcut = False
+                self._stop_hold_voice()
+                return True
         return super().eventFilter(watched, event)
 
     def _init_kernel(self):
@@ -1763,7 +1640,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         self.hide()
-        self.tray.showMessage("ULTRON", "Running in background — Alt+` still works",
+        self.tray.showMessage("ULTRON", "Running in the system tray",
                               QSystemTrayIcon.Information, 2500)
         e.ignore()
 

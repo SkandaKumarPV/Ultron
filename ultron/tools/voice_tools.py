@@ -4,6 +4,7 @@ from typing import Optional
 from ultron.tools.registry import BaseTool, ToolCategory, ToolParameter, ToolResult, tool_registry
 from ultron.security.permissions import PermissionLevel
 from ultron.voice.pipeline import voice_pipeline
+from ultron.voice.stt import TranscriptionError
 from ultron.security.audit import audit_log, AuditEventType, AuditSeverity
 
 
@@ -25,10 +26,14 @@ class VoiceListenTool(BaseTool):
                     data="Listening... Call voice_listen with action='stop' to end recording.",
                     verification={"action": "start", "state": "listening"}
                 )
-            return ToolResult(success=False, error="Already listening or voice not ready")
+            return ToolResult(success=False, error=voice_pipeline.input_error() or
+                              "Already listening or voice not ready")
 
         elif action == "stop":
-            text = voice_pipeline.push_to_talk_stop()
+            try:
+                text = voice_pipeline.push_to_talk_stop()
+            except TranscriptionError as error:
+                return ToolResult(success=False, error=str(error))
             if text is not None:
                 return ToolResult(
                     success=True,

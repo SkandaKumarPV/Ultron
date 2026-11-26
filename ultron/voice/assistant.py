@@ -1,4 +1,4 @@
-"""ULTRON Voice Assistant - Alexa-style always-on voice control
+"""ULTRON Voice Assistant - Alexa-style voice control
 
 Flow (like Alexa):
   1. Press Alt+` (or the mic button) -> assistant becomes ARMED
@@ -6,20 +6,14 @@ Flow (like Alexa):
   3. ULTRON verifies its own name, runs the command through the kernel,
      and SPEAKS the answer back out loud.
 
-Works fully locally: faster-whisper keyword wake detection + Piper (TTS) +
-the ULTRON kernel (tools/PC control/workspace AI). The wake listener uses one
-microphone stream so the wake phrase and its command stay in the same transcript.
-
-Windows can block the microphone (Privacy settings). The assistant reports
-that case precisely and offers the fix instead of hanging silently.
+Uses ElevenLabs for speech recognition and Piper or Windows SAPI for speech output.
+While wake listening is enabled, detected speech is sent for wake-phrase verification.
 """
-import os
 import re
 import time
-import queue
 import threading
-import tempfile
-import wave
+from collections import deque
+from queue import Empty, Full, Queue
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
@@ -27,14 +21,14 @@ from typing import Optional, Callable, Dict, Any, List
 import numpy as np
 
 from ultron.config import config
+from ultron.automation import command_text, explicit_action, wants_workspace
 from ultron.security.audit import audit_log, AuditEventType, AuditSeverity
-from ultron.voice.wake_word import (
-    wake_word_detector, WakeWordState, contains_wake_word, MIC_BLOCK_MESSAGE,
-)
+from ultron.voice.stt import TranscriptionError, transcribe_pcm
+from ultron.voice.wake_word import wake_word_detector
 
-WAKE_PHRASES = (
-    "hey ultron", "ultron", "hey al tron", "hey altar on", "hey ultra on",
-    "ultra on", "ultra one", "hailtron", "hail tron", "hello ultron",
+_WAKE_PREFIX = re.compile(
+    r"^(?:(?:hey|hi|hello|okay|ok)[\s,]+)?"
+    r"(?:ultron|al[\s-]+tron|altar on|ultra one|ultra on|hail\s*tron)\b", re.I
 )
 
 
@@ -43,6 +37,7 @@ class AssistantState(Enum):
     DORMANT = "dormant"      # running, waiting to be armed
     ARMED = "armed"          # hotkey pressed - listening for wake word
     CAPTURING = "capturing"  # wake word heard - recording the command
+    TRANSCRIBING = "transcribing"
     THINKING = "thinking"    # running the command
     SPEAKING = "speaking"    # speaking the reply
     ERROR = "error"
@@ -52,18 +47,11 @@ def strip_wake_phrase(text: str) -> str:
     """Remove the wake phrase (and any leading greeting) so only the command remains."""
     if not text:
         return ""
-    t = text.strip()
-    low = t.lower()
-    for p in sorted(WAKE_PHRASES, key=len, reverse=True):
-        i = low.find(p)
-        if i >= 0:
-            rest = t[i + len(p):].strip(" ,.!?:;")
-            return _strip_leading_greeting(rest)
-    m = contains_wake_word(t)
-    if m:
-        i = low.find(m)
-        return _strip_leading_greeting(t[i + len(m):].strip(" ,.!?:;"))
-    return t
+    text = text.strip()
+    match = _WAKE_PREFIX.match(text)
+    if match:
+        return _strip_leading_greeting(text[match.end():].strip(" ,.!?:;"))
+    return text
 
 
 GREETINGS = ("hello", "hi", "hey", "ok", "okay", "please", "now", "can you", "could you")
@@ -85,29 +73,31 @@ def _strip_leading_greeting(text: str) -> str:
 
 def is_wake_phrase(text: str) -> bool:
     """Accept if the transcript clearly contains ULTRON's name."""
-    return contains_wake_word(text) is not None
+    return bool(_WAKE_PREFIX.match(text.strip()))
 
 
 class VoiceAssistant:
-    """Manages the complete local voice-interaction loop."""
+    """Manages the voice-interaction loop."""
 
     def __init__(self):
         self.state = AssistantState.OFF
         self.enabled = False
         self._lock = threading.RLock()
-        self._wake_running = False
+        self._wake_stop = threading.Event()
+        self._continuous_wake = False
         self._pyaudio = None
-        self._record_thread: Optional[threading.Thread] = None
-        self._stt = None
+        self._record_lock = threading.Lock()
+        self.input_device = None
         self._tts = None
         self._speak_threads: List[threading.Thread] = []
+        self._speech_lock = threading.Lock()
         self._manual_stop = threading.Event()
         self._manual_thread: Optional[threading.Thread] = None
         self._manual_text: Optional[str] = None
+        self._manual_speak_reply = True
         self.last_transcript: Optional[str] = None
         self.last_response: Optional[str] = None
         self.error: Optional[str] = None
-        self.stt_model_name = "base.en"
         self.reply_aloud = True
         # UI callbacks
         self.on_state_change: Optional[Callable[[AssistantState, Dict[str, Any]], None]] = None
@@ -118,42 +108,38 @@ class VoiceAssistant:
     # lifecycle
     # ------------------------------------------------------------------
     def initialize(self) -> bool:
-        """Load STT + TTS (wake word models load on demand)."""
-        with self._lock:
-            self._set_state(AssistantState.DORMANT)
+        """Check voice input configuration and load TTS."""
         try:
             from ultron.voice.pipeline import voice_pipeline
             voice_pipeline.initialize()
-            self._stt = voice_pipeline._stt_model
+            if (error := voice_pipeline.input_error()) is not None:
+                raise TranscriptionError(error)
             self._tts = voice_pipeline._tts_voice
-            self.stt_model_name = voice_pipeline._config.stt_model
-            audit_log(AuditEventType.MODEL_LOADED, severity=AuditSeverity.INFO,
-                      details={"component": "voice_assistant",
-                               "stt": self.stt_model_name, "tts": "piper"})
+            self.error = None
             return True
         except Exception as e:
-            self.error = f"{type(e).__name__}: {e}"
-            self._set_state(AssistantState.ERROR, {"error": self.error})
+            self._set_input_error(e)
             return False
 
-    def start(self) -> bool:
-        """Turn the assistant ON (dormant until armed)."""
+    def start(self, listen_for_wake: bool = True) -> bool:
+        """Turn on voice input and begin listening for the wake phrase."""
         if self.enabled:
-            return True
-        if self._stt is None and not self.initialize():
+            return self.arm() if listen_for_wake else True
+        if not self.initialize():
             return False
         self.enabled = True
         self._set_state(AssistantState.DORMANT)
         audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
                   details={"action": "assistant_start"})
-        return True
+        return self.arm() if listen_for_wake else True
 
     def stop(self):
         """Turn the assistant OFF."""
         self.enabled = False
-        self._wake_running = False
+        self._continuous_wake = False
+        self._wake_stop.set()
+        self._manual_stop.set()
         wake_word_detector.stop()
-        self._close_record_stream()
         self._set_state(AssistantState.OFF)
         audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
                   details={"action": "assistant_stop"})
@@ -162,35 +148,44 @@ class VoiceAssistant:
     # arming (hotkey / mic button)
     # ------------------------------------------------------------------
     def arm(self) -> bool:
-        """Alt+` was pressed: start listening for 'Hey ULTRON'."""
+        """Start listening for 'Hey ULTRON' until voice mode is paused."""
         if not self.enabled:
-            if not self.start():
+            if not self.start(listen_for_wake=False):
                 return False
         with self._lock:
             if self.state == AssistantState.ARMED:
                 return True
+            if self.state not in (AssistantState.DORMANT, AssistantState.ERROR):
+                return False
+            self.error = None
+            self._continuous_wake = True
             self._set_state(AssistantState.ARMED)
-        self._start_wake_listening()
+            self._start_wake_listening()
         return True
 
     def disarm(self):
         """Stop listening."""
-        self._wake_running = False
+        self._continuous_wake = False
+        self._wake_stop.set()
         wake_word_detector.stop()
         if self.state not in (AssistantState.OFF, AssistantState.SPEAKING):
             self._set_state(AssistantState.DORMANT)
 
-    def start_push_to_talk(self) -> bool:
+    def start_push_to_talk(self, speak_reply: bool = True) -> bool:
         """Start a complete manual recording for the desktop hotkey."""
-        if not self.enabled and not self.start():
+        if not self.enabled and not self.start(listen_for_wake=False):
             return False
         with self._lock:
-            if self.state not in (AssistantState.DORMANT, AssistantState.ARMED):
+            if self._manual_thread and self._manual_thread.is_alive():
                 return False
-            self._wake_running = False
+            if self.state not in (AssistantState.DORMANT, AssistantState.ARMED, AssistantState.ERROR):
+                return False
+            self._wake_stop.set()
             wake_word_detector.stop()
             self._manual_stop.clear()
             self._manual_text = None
+            self._manual_speak_reply = speak_reply
+            self.error = None
             self._set_state(AssistantState.CAPTURING,
                             {"mode": "push_to_talk", "action": "started"})
 
@@ -204,66 +199,153 @@ class VoiceAssistant:
                   details={"action": "push_to_talk_started", "mode": "desktop_hotkey"})
         return True
 
-    def stop_push_to_talk(self) -> Optional[str]:
-        """Stop the desktop hotkey recording, route its transcript, and return it."""
-        if self.state != AssistantState.CAPTURING or not self._manual_thread:
+    def stop_push_to_talk(self, speak_reply: Optional[bool] = None) -> Optional[str]:
+        """Release the microphone and wait for the current transcript."""
+        worker = self._manual_thread
+        if worker is None:
             return None
+        if speak_reply is not None and self.state == AssistantState.CAPTURING:
+            self._manual_speak_reply = speak_reply
         self._manual_stop.set()
-        self._manual_thread.join(timeout=3.0)
-        text = self._manual_text
-        self._manual_thread = None
-        if text:
-            self.handle_transcript(text)
-        else:
-            self._set_state(AssistantState.DORMANT)
-            audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.WARNING,
-                      details={"action": "push_to_talk_empty"})
-        return text
+        worker.join(timeout=28.0)
+        return self._manual_text
 
     def _manual_capture_worker(self):
         try:
-            self._manual_text = self._record_and_transcribe(
-                max_seconds=30.0,
-                silence_ms=0,
-                stop_event=self._manual_stop,
+            text = self._record_and_transcribe(
+                max_seconds=30.0, silence_ms=0, stop_event=self._manual_stop,
             )
-        except Exception as e:
-            self.error = f"{type(e).__name__}: {e}"
-            self._manual_text = None
-            self._set_state(AssistantState.ERROR, {"error": self.error})
+            if not self.enabled or self.state not in (AssistantState.CAPTURING, AssistantState.TRANSCRIBING):
+                return
+            self._manual_text = text
+            if text:
+                if self._manual_speak_reply:
+                    self.handle_transcript(text)
+                else:
+                    self.handle_transcript(text, speak_reply=False)
+            if self.state in (AssistantState.CAPTURING, AssistantState.TRANSCRIBING):
+                self._set_state(AssistantState.DORMANT)
+                if not text:
+                    audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.WARNING,
+                              details={"action": "push_to_talk_empty"})
+            self._resume_wake()
+        except Exception as error:
+            if self.enabled and self.state != AssistantState.OFF:
+                self._set_input_error(error)
+
+    def _set_input_error(self, error):
+        self.error = str(error)
+        self._set_state(AssistantState.ERROR, {"error": self.error})
+        audit_log(AuditEventType.ERROR, severity=AuditSeverity.WARNING,
+                  details={"component": "voice_input", "message": self.error})
 
     def _start_wake_listening(self):
-        if self._wake_running:
-            return
-        self._wake_running = True
-        # Use one STT microphone stream. The bundled acoustic models are
-        # surrogates for ULTRON and can race the keyword listener for input.
-        threading.Thread(target=self._keyword_watch_loop, daemon=True,
-                         name="ultron-kw-watch").start()
-        audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
-                  details={"action": "wake_listening_started", "mode": "stt_keyword"})
+        stop_event = threading.Event()
+        self._wake_stop = stop_event
+        threading.Thread(target=self._listen_for_wake, args=(stop_event,), daemon=True,
+                         name="ultron-wake-listen").start()
+
+    def _listen_for_wake(self, stop_event: threading.Event):
+        try:
+            while not stop_event.is_set():
+                text = self._record_and_transcribe(
+                    max_seconds=12.0, silence_ms=850, stop_event=stop_event, armed=True,
+                )
+                if stop_event.is_set() or self.state != AssistantState.ARMED:
+                    return
+                if text and is_wake_phrase(text):
+                    if strip_wake_phrase(text):
+                        self.handle_transcript(text)
+                        self._resume_wake()
+                    else:
+                        self.capture_command()
+                    return
+                if not self._continuous_wake:
+                    self._set_state(AssistantState.DORMANT)
+                    return
+        except Exception as error:
+            if not stop_event.is_set():
+                self._set_input_error(error)
+
+    def _resume_wake(self):
+        if self.enabled and self._continuous_wake and self.state == AssistantState.DORMANT:
+            self.arm()
 
     # ------------------------------------------------------------------
     # command capture
     # ------------------------------------------------------------------
-    def _open_mic(self):
+    @staticmethod
+    def _microphone_devices(audio):
+        for index in range(audio.get_device_count()):
+            device = audio.get_device_info_by_index(index)
+            if device["maxInputChannels"] > 0:
+                host = audio.get_host_api_info_by_index(device["hostApi"])["name"]
+                yield (device["name"], host), device
+
+    @classmethod
+    def microphone_choices(cls):
+        import pyaudio
+        audio = pyaudio.PyAudio()
+        try:
+            return [key for key, _ in cls._microphone_devices(audio)
+                    if "WDM-KS" not in key[1] and "sound capture driver" not in key[0].lower()
+                    and "sound mapper" not in key[0].lower()]
+        finally:
+            audio.terminate()
+
+    def _open_mic(self, callback):
         if self._pyaudio is None:
             import pyaudio
             self._pyaudio = pyaudio.PyAudio()
         import pyaudio
-        return self._pyaudio.open(
-            format=pyaudio.paInt16, channels=1, rate=16000,
-            input=True, frames_per_buffer=512,
+        if self.input_device is None:
+            device = self._pyaudio.get_default_input_device_info()
+        else:
+            device = next((info for key, info in self._microphone_devices(self._pyaudio)
+                           if key == self.input_device), None)
+            if device is None:
+                raise RuntimeError("The selected microphone is unavailable. Choose another input in the Voice tab.")
+        rate = int(device["defaultSampleRate"])
+        stream = self._pyaudio.open(
+            format=pyaudio.paInt16, channels=1, rate=rate, input=True,
+            input_device_index=device["index"], frames_per_buffer=max(256, rate // 32),
+            stream_callback=callback,
         )
+        return stream, rate
 
-    def _close_record_stream(self):
-        if hasattr(self, "_rec_stream") and self._rec_stream:
+    def test_microphone(self):
+        """Measure two seconds of local audio without saving or transcribing it."""
+        import pyaudio
+        if not self._record_lock.acquire(timeout=1.0):
+            raise RuntimeError("Voice input is busy. Try again after recording ends.")
+        buffers = Queue(maxsize=64)
+
+        def receive(data, frames, clock, status):
+            if data:
+                try:
+                    buffers.put_nowait(data)
+                except Full:
+                    pass
+            return None, pyaudio.paContinue
+
+        try:
+            stream, _ = self._open_mic(receive)
             try:
-                self._rec_stream.stop_stream()
-                self._rec_stream.close()
-            except Exception:
-                pass
-            self._rec_stream = None
+                deadline = time.monotonic() + 2.0
+                count, peak = 0, 0
+                while time.monotonic() < deadline:
+                    try:
+                        data = buffers.get(timeout=0.1)
+                    except Empty:
+                        continue
+                    samples = np.frombuffer(data, dtype=np.int16).astype(np.int32)
+                    count += samples.size
+                    peak = max(peak, int(np.abs(samples).max()))
+                return count, peak / 32768
+            finally:
+                stream.close()
+        finally:
+            self._record_lock.release()
 
     def capture_command(self, max_seconds: float = 6.0, silence_ms: int = 900):
         """Record the command that follows the wake word and run it."""
@@ -271,7 +353,7 @@ class VoiceAssistant:
             if self.state != AssistantState.ARMED:
                 return None
             wake_word_detector.stop()  # free the mic
-            self._wake_running = False
+            self._wake_stop.set()
             self._set_state(AssistantState.CAPTURING)
 
         def work():
@@ -284,15 +366,19 @@ class VoiceAssistant:
     def _capture_thread(self, work):
         try:
             text = work()
+            if not self.enabled or self.state not in (AssistantState.CAPTURING, AssistantState.TRANSCRIBING):
+                return
             if not text:
                 audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.WARNING,
                           details={"action": "transcript_empty"})
                 self._set_state(AssistantState.DORMANT)
+                self._resume_wake()
                 return
             self.handle_transcript(text)
+            self._resume_wake()
         except Exception as e:
-            self.error = f"{type(e).__name__}: {e}"
-            self._set_state(AssistantState.ERROR, {"error": self.error})
+            if self.enabled and self.state != AssistantState.OFF:
+                self._set_input_error(e)
 
     def handle_transcript(self, text: str, speak_reply: bool = True) -> Optional[str]:
         """Route a completed transcript through execution and optional TTS."""
@@ -313,7 +399,7 @@ class VoiceAssistant:
             audit_log(AuditEventType.VOICE_OUTPUT, severity=AuditSeverity.INFO,
                       details={"action": "empty_command", "response": reply})
             if speak_reply:
-                self.speak(reply)
+                self.speak(reply, block=True)
             return reply
 
         self._set_state(AssistantState.THINKING, {"command": command})
@@ -330,9 +416,9 @@ class VoiceAssistant:
                 audit_log(AuditEventType.ERROR, severity=AuditSeverity.WARNING,
                           details={"component": "assistant_response_callback", "error": str(e)})
         if reply and speak_reply:
-            self._set_state(AssistantState.SPEAKING)
-            self.speak(reply)
-        self._set_state(AssistantState.DORMANT)
+            self.speak(reply, block=True)
+        if self.state == AssistantState.THINKING:
+            self._set_state(AssistantState.DORMANT)
         return reply
 
     def _record_and_transcribe(
@@ -340,169 +426,98 @@ class VoiceAssistant:
         max_seconds: float,
         silence_ms: int,
         stop_event: Optional[threading.Event] = None,
+        armed: bool = False,
     ) -> Optional[str]:
-        """Rolling record with silence stop, then faster-whisper transcription."""
-        stream = self._open_mic()
-        self._rec_stream = stream
-        chunks: List[bytes] = []
-        silent = 0
-        started = time.time()
-        drain_until: Optional[float] = None
-        # enough lead-in audio for the wake word to be included
-        while time.time() - started < max_seconds:
-            if stop_event and stop_event.is_set():
-                if drain_until is None:
-                    # Let audio already inside the device/PortAudio buffer arrive.
-                    drain_until = time.time() + 0.35
-                elif time.time() >= drain_until:
-                    break
-            try:
-                data = stream.read(512, exception_on_overflow=False)
-            except Exception:
-                break
-            chunks.append(data)
-            rms = _rms(np.frombuffer(data, dtype=np.int16))
-            quiet = 0.02
-            if rms < quiet:
-                silent += 512
-            else:
-                silent = 0
-            if len(chunks) > 16000 // 512 * 2 and silent * 1000 // 16000 >= silence_ms:
-                break
-        try:
-            stream.stop_stream()
-            stream.close()
-        except Exception:
-            pass
-        self._rec_stream = None
+        with self._record_lock:
+            if not self.enabled or (armed and stop_event and stop_event.is_set()):
+                return None
+            import pyaudio
+            buffers = Queue(maxsize=64)
 
-        audio = b"".join(chunks)
-        if not audio:
-            return None
-        return self._transcribe_bytes(audio)
-
-    def _transcribe_bytes(self, audio: bytes) -> Optional[str]:
-        if not self._stt:
-            return None
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            path = tmp.name
-        try:
-            with wave.open(path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(16000)
-                wf.writeframes(audio)
-            segments, _ = self._stt.transcribe(
-                path, beam_size=3, language="en", vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=300),
-            )
-            text = " ".join(s.text for s in segments).strip()
-            return text or None
-        except Exception as e:
-            if any(marker in str(e).lower() for marker in ("cublas", "cudnn", "cuda")):
-                audit_log(
-                    AuditEventType.ERROR,
-                    severity=AuditSeverity.WARNING,
-                    details={"component": "assistant_stt",
-                             "error": f"GPU runtime unavailable; retrying on CPU: {e}"},
-                )
-                try:
-                    from ultron.voice.pipeline import voice_pipeline
-                    voice_pipeline._load_stt(force_cpu=True)
-                    self._stt = voice_pipeline._stt_model
-                    if self._stt:
-                        segments, _ = self._stt.transcribe(
-                            path, beam_size=3, language="en", vad_filter=True,
-                            vad_parameters=dict(min_silence_duration_ms=300),
-                        )
-                        text = " ".join(s.text for s in segments).strip()
-                        audit_log(
-                            AuditEventType.VOICE_INPUT,
-                            severity=AuditSeverity.INFO,
-                            details={"action": "transcribe", "text_length": len(text),
-                                     "device": "cpu"},
-                        )
-                        return text or None
-                except Exception as cpu_error:
-                    audit_log(
-                        AuditEventType.ERROR,
-                        severity=AuditSeverity.ERROR,
-                        details={"component": "assistant_stt_cpu_fallback",
-                                 "error": str(cpu_error)},
-                    )
-            audit_log(AuditEventType.ERROR, severity=AuditSeverity.WARNING,
-                      details={"component": "assistant_stt", "error": str(e)})
-            return None
-        finally:
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
-
-    def _keyword_watch_loop(self):
-        """Safety net: transcribe and accept when the word 'ultron' is spoken.
-
-        Covers cases where the acoustic surrogate does not fire.
-        """
-        window = 1.3  # seconds of audio per transcription window
-        while self._wake_running:
-            try:
-                if not self._pyaudio:
-                    import pyaudio
-                    self._pyaudio = pyaudio.PyAudio()
-                import pyaudio
-                stream = self._pyaudio.open(
-                    format=pyaudio.paInt16, channels=1, rate=16000,
-                    input=True, frames_per_buffer=512,
-                )
-                frames = []
-                deadline = time.time() + window
-                while time.time() < deadline:
+            def receive(data, frames, clock, status):
+                if data:
                     try:
-                        frames.append(stream.read(512, exception_on_overflow=False))
-                    except Exception:
+                        buffers.put_nowait(data)
+                    except Full:
+                        pass
+                return None, pyaudio.paContinue
+
+            stream, sample_rate = self._open_mic(receive)
+            chunks: List[bytes] = []
+            lead_in = deque(maxlen=8)
+            silent_frames = 0
+            heard_speech = False
+            deadline = time.monotonic() + max_seconds
+            last_buffer = time.monotonic()
+            drain_until: Optional[float] = None
+            try:
+                while self.enabled and time.monotonic() < deadline:
+                    if stop_event and stop_event.is_set():
+                        if armed:
+                            return None
+                        if drain_until is None:
+                            drain_until = time.monotonic() + 0.35
+                        elif time.monotonic() >= drain_until:
+                            break
+                    try:
+                        data = buffers.get(timeout=0.2)
+                    except Empty:
+                        if time.monotonic() - last_buffer > 2:
+                            raise RuntimeError("The microphone opened but sent no audio. Check Windows microphone access and the default input device.")
+                        continue
+                    last_buffer = time.monotonic()
+                    threshold = 0.02 if armed else 0.005
+                    voiced = _rms(np.frombuffer(data, dtype=np.int16)) >= threshold
+                    if armed and not heard_speech:
+                        if not voiced:
+                            lead_in.append(data)
+                            continue
+                        chunks.extend(lead_in)
+                        deadline = time.monotonic() + max_seconds
+                    chunks.append(data)
+                    if voiced:
+                        heard_speech = True
+                        silent_frames = 0
+                    else:
+                        silent_frames += len(data) // 2
+                    if silence_ms and heard_speech and silent_frames * 1000 >= silence_ms * sample_rate:
                         break
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception:
-                    pass
-                audio = b"".join(frames)
-                if audio:
-                    text = self._transcribe_bytes(audio)
-                    if text:
-                        audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
-                                  details={"action": "wake_window_transcript", "text": text[:120]})
-                    if text and is_wake_phrase(text) and self.state == AssistantState.ARMED:
-                        audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
-                                  details={"action": "keyword_wake", "text": text[:60]})
-                        if strip_wake_phrase(text):
-                            # The command may already be in the same STT window.
-                            self._set_state(AssistantState.THINKING,
-                                            {"command": strip_wake_phrase(text)})
-                            self.handle_transcript(text)
-                        else:
-                            self.capture_command()
-                        return
-            except Exception as e:
-                audit_log(AuditEventType.ERROR, severity=AuditSeverity.WARNING,
-                          details={"component": "keyword_watch", "error": str(e)})
-                time.sleep(1.0)
+            finally:
+                stream.close()
+
+        if not self.enabled or not heard_speech:
+            return None
+        if armed and stop_event and stop_event.is_set():
+            return None
+        if not armed and self.state == AssistantState.CAPTURING:
+            self._set_state(AssistantState.TRANSCRIBING)
+        return self._transcribe_bytes(b"".join(chunks), sample_rate)
+
+    def _transcribe_bytes(self, audio: bytes, sample_rate: int = 16000) -> Optional[str]:
+        return transcribe_pcm(audio, sample_rate=sample_rate, channels=1)
 
     # ------------------------------------------------------------------
     # execution + speech
     # ------------------------------------------------------------------
     def _execute(self, command: str, transcript: Optional[str] = None) -> Optional[str]:
         """Classify voice input, normalize commands, and route it to the kernel."""
-        original_text = transcript or command
-        is_command, prepared_text = self._prepare_voice_input(original_text)
-        command = prepared_text or command
-        if is_command and command == original_text.strip():
-            command = self._normalize_voice_command(command) or command
+        command = command_text(command)
+        original_text = command_text(strip_wake_phrase(transcript)) if transcript else command
+        has_route = bool(explicit_action(command)) or wants_workspace(command)
+        is_command = False
+        if not has_route:
+            is_command, prepared_text = self._prepare_voice_input(original_text)
+            command = prepared_text or command
+            if is_command and command == original_text.strip():
+                command = self._normalize_voice_command(command) or command
+            corrected_action = explicit_action(command)
+            if corrected_action and (corrected_action[0] == "ask_in_browser" or corrected_action[1].get("args")):
+                # Model correction cannot create a new external request.
+                command = original_text
         try:
             from ultron.kernel import kernel, UltronRequest, RequestType
             from ultron.workspace.selector import workspace_manager
-            kernel.initialize()
+            kernel.initialize(start_voice=False)
             req = UltronRequest(
                 request_id=f"voice_{int(time.time()*1000)}",
                 request_type=RequestType.VOICE_COMMAND,
@@ -511,22 +526,11 @@ class VoiceAssistant:
             )
             resp = kernel.process(req)
             text = getattr(resp, "response_text", None) or str(resp)
-            if getattr(resp, "success", False):
-                return text.strip()
-            if not is_command:
-                return text.strip()
-            fallback = self._direct_tool_dispatch(command)
-            return fallback or text.strip()
-        except Exception as e:
+            return text.strip()
+        except Exception as error:
             audit_log(AuditEventType.ERROR, severity=AuditSeverity.ERROR,
-                      details={"component": "assistant_exec", "error": str(e)})
-            # fall back to a direct tool call if the kernel can't route it
-            if not is_command:
-                return f"Sorry, I could not answer that. {type(e).__name__}: {e}"
-            try:
-                return self._direct_tool_dispatch(command)
-            except Exception as e2:
-                return f"Sorry, I could not do that. {type(e2).__name__}: {e2}"
+                      details={"component": "assistant_exec", "error": str(error)})
+            return f"Sorry, I could not complete that request. {error}"
 
     def _prepare_voice_input(self, transcript: str) -> tuple[bool, str]:
         """Classify input before applying command-only speech correction."""
@@ -645,59 +649,26 @@ class VoiceAssistant:
                       details={"component": "voice_normalization", "error": str(e)})
             return transcript.strip()
 
-    def _direct_tool_dispatch(self, command: str) -> str:
-        """Minimal direct routing when the kernel is unavailable."""
-        import shutil
-        import subprocess
-        m = re.search(r"\b(?:open|launch|start)\s+([\w\s\.\-]+)$", command.strip(), re.I)
-        if m:
-            app = m.group(1).strip().rstrip(".")
-            common = {
-                "notepad": "notepad.exe", "chrome": "chrome.exe", "calculator": "calc.exe",
-                "google chrome": "chrome.exe",
-                "explorer": "explorer.exe", "cmd": "cmd.exe", "paint": "mspaint.exe",
-                "vs code": "code.exe", "vscode": "code.exe", "visual studio code": "code.exe",
-                "windows terminal": "wt.exe", "terminal": "wt.exe",
-            }
-            target = common.get(app.lower(), f"{app}.exe")
-            if not shutil.which(target):
-                known_paths = {
-                    "chrome.exe": [
-                        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                        os.path.expandvars(
-                            r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
-                        ),
-                    ],
-                    "code.exe": [
-                        r"C:\Program Files\Microsoft VS Code\Code.exe",
-                        os.path.expandvars(
-                            r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"
-                        ),
-                    ],
-                }
-                executable = next(
-                    (path for path in known_paths.get(target, []) if os.path.exists(path)),
-                    target,
-                )
-            else:
-                executable = shutil.which(target)
-            subprocess.Popen([executable])
-            audit_log(AuditEventType.APP_LAUNCHED, severity=AuditSeverity.INFO,
-                      details={"app": app, "executable": executable, "source": "voice"})
-            return f"Opening {app}."
-        return None
-
     def speak(self, text: str, block: bool = False) -> bool:
         """Speak text aloud (fallback: Windows SAPI)."""
         if not text:
             return False
         if block or threading.current_thread() is threading.main_thread():
-            return self._speak_sync(text)
-        t = threading.Thread(target=self._speak_sync, args=(text,), daemon=True)
+            return self._speak_with_state(text)
+        t = threading.Thread(target=self._speak_with_state, args=(text,), daemon=True)
         self._speak_threads.append(t)
         t.start()
         return True
+
+    def _speak_with_state(self, text: str) -> bool:
+        with self._speech_lock:
+            previous = self.state
+            self._set_state(AssistantState.SPEAKING)
+            try:
+                return self._speak_sync(text)
+            finally:
+                if self.state == AssistantState.SPEAKING:
+                    self._set_state(previous)
 
     def _speak_sync(self, text: str) -> bool:
         try:
@@ -741,15 +712,18 @@ class VoiceAssistant:
         except Exception:
             try:
                 import subprocess
-                safe = text[:400].replace("'", "''")
                 ps = (
                     "Add-Type -AssemblyName System.Speech;"
                     "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-                    f"$s.Speak('{safe}')"
+                    "[Console]::InputEncoding = [Text.Encoding]::UTF8;"
+                    "$s.Speak([Console]::In.ReadToEnd())"
                 )
-                subprocess.Popen(["powershell", "-Command", ps],
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                return True
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    timeout=120, input=text, encoding="utf-8",
+                )
+                return result.returncode == 0
             except Exception:
                 return False
 

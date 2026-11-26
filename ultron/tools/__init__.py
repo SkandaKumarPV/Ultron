@@ -6,3 +6,4 @@ from . import task_tools
 from . import workspace_automation
 from . import advanced_automation
 from . import image_tools
+from . import browser_tools

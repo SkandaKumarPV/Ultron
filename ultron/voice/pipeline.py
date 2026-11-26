@@ -1,11 +1,5 @@
 """ULTRON Voice Pipeline - Push-to-talk, STT, TTS"""
 import threading
-import queue
-import time
-import os
-import tempfile
-import wave
-import audioop
 from typing import Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -13,6 +7,7 @@ from pathlib import Path
 
 from ultron.config import config
 from ultron.security.audit import audit_log, AuditEventType, AuditSeverity
+from ultron.voice.stt import MISSING_KEY, TranscriptionError, has_api_key, transcribe_pcm
 
 
 class VoiceState(Enum):
@@ -30,8 +25,6 @@ class VoiceConfig:
     sample_rate: int = 16000
     channels: int = 1
     chunk_size: int = 1024
-    stt_engine: str = "faster-whisper"
-    stt_model: str = "base.en"
     tts_engine: str = "piper"
     tts_voice: str = "en_US-lessac-medium"
     tts_voice_path: str = ""
@@ -46,7 +39,6 @@ class VoicePipeline:
     def __init__(self):
         self._config = VoiceConfig()
         self._state = VoiceState.IDLE
-        self._stt_model = None
         self._tts_voice = None
         self._running = False
         self._callback: Optional[Callable[[str], None]] = None
@@ -67,8 +59,6 @@ class VoicePipeline:
         self._config.wake_word = cfg.wake_word
         self._config.sample_rate = cfg.sample_rate
         self._config.channels = cfg.channels
-        self._config.stt_engine = cfg.stt_engine
-        self._config.stt_model = cfg.stt_model
         self._config.tts_engine = cfg.tts_engine
         self._config.tts_voice = cfg.tts_voice
         
@@ -77,47 +67,11 @@ class VoicePipeline:
         if voice_path.exists():
             self._config.tts_voice_path = str(voice_path)
         
-        # Load STT model (faster-whisper)
-        self._load_stt()
-        
         # Load TTS (Piper)
         self._load_tts()
         
         # Initialize PyAudio for recording
         self._init_audio()
-
-    def _load_stt(self, force_cpu: bool = False):
-        """Load faster-whisper model"""
-        try:
-            from faster_whisper import WhisperModel
-
-            import ctranslate2
-            use_cuda = not force_cpu and ctranslate2.get_cuda_device_count() > 0
-            device = "cuda" if use_cuda else "cpu"
-            compute_type = "float16" if use_cuda else "int8"
-            try:
-                self._stt_model = WhisperModel(
-                    self._config.stt_model,
-                    device=device,
-                    compute_type=compute_type,
-                )
-            except Exception:
-                if not use_cuda:
-                    raise
-                device = "cpu"
-                compute_type = "int8"
-                self._stt_model = WhisperModel(
-                    self._config.stt_model,
-                    device=device,
-                    compute_type=compute_type,
-                )
-            audit_log(AuditEventType.MODEL_LOADED, severity=AuditSeverity.INFO,
-                      details={"model": self._config.stt_model, "type": "stt",
-                               "engine": "faster-whisper", "device": device,
-                               "compute_type": compute_type})
-        except Exception as e:
-            audit_log(AuditEventType.ERROR, severity=AuditSeverity.ERROR,
-                      details={"message": f"Failed to load STT model: {e}"})
 
     def _load_tts(self):
         """Load Piper TTS voice"""
@@ -139,18 +93,19 @@ class VoicePipeline:
         """Initialize PyAudio for recording"""
         try:
             import pyaudio
-            self._pyaudio = pyaudio.PyAudio()
+            if self._pyaudio is None:
+                self._pyaudio = pyaudio.PyAudio()
         except Exception as e:
             audit_log(AuditEventType.ERROR, severity=AuditSeverity.WARNING,
                       details={"message": f"PyAudio not available: {e}"})
             self._pyaudio = None
 
-    def start(self, callback: Callable[[str], None]):
+    def start(self, callback: Optional[Callable[[str], None]] = None):
         """Start voice pipeline"""
         with self._lock:
+            self._callback = callback
             if self._running:
                 return
-            self._callback = callback
             self._running = True
             self._state = VoiceState.IDLE
 
@@ -229,12 +184,15 @@ class VoicePipeline:
     def push_to_talk_start(self) -> bool:
         """Start push-to-talk recording"""
         with self._lock:
-            if not self._running or self._state != VoiceState.IDLE:
+            if not self._running or self._state != VoiceState.IDLE or not self.is_ready():
                 return False
             self._state = VoiceState.LISTENING
             audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
                       details={"action": "push_to_talk_start"})
-            return self._start_recording()
+            if self._start_recording():
+                return True
+            self._state = VoiceState.IDLE
+            return False
 
     def push_to_talk_stop(self) -> Optional[str]:
         """Stop push-to-talk and return transcribed text"""
@@ -251,13 +209,12 @@ class VoicePipeline:
                 self._state = VoiceState.IDLE
             return None
 
-        # Save to temp file for STT
-        audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
-                  details={"action": "stt_started", "audio_bytes": len(audio_data)})
-        text = self._transcribe_audio(audio_data)
 
-        with self._lock:
-            self._state = VoiceState.IDLE
+        try:
+            text = self._transcribe_audio(audio_data)
+        finally:
+            with self._lock:
+                self._state = VoiceState.IDLE
 
         if text and self._callback:
             try:
@@ -269,84 +226,15 @@ class VoicePipeline:
         return text
 
     def _transcribe_audio(self, audio_data: bytes) -> Optional[str]:
-        """Transcribe audio data using faster-whisper"""
-        if not self._stt_model:
-            return None
-
-        # Save audio to temp WAV file
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-            tmp_path = tmp.name
-            try:
-                with wave.open(tmp_path, 'wb') as wf:
-                    wf.setnchannels(self._config.channels)
-                    wf.setsampwidth(2)  # 16-bit
-                    wf.setframerate(self._config.sample_rate)
-                    wf.writeframes(audio_data)
-            except Exception as e:
-                audit_log(AuditEventType.ERROR, severity=AuditSeverity.ERROR,
-                          details={"message": f"Failed to write WAV: {e}"})
-                return None
-
         try:
-            segments, info = self._stt_model.transcribe(
-                tmp_path,
-                beam_size=1,
-                language="en",
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500)
-            )
-            
-            text = " ".join([seg.text for seg in segments]).strip()
-            
-            audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
-                      details={"action": "transcribe", "text_length": len(text), "language": info.language})
-            
-            return text if text else None
-            
-        except Exception as e:
-            if any(marker in str(e).lower() for marker in ("cublas", "cudnn", "cuda")):
-                audit_log(
-                    AuditEventType.ERROR,
-                    severity=AuditSeverity.WARNING,
-                    details={"message": f"STT GPU runtime unavailable; retrying on CPU: {e}"},
-                )
-                self._load_stt(force_cpu=True)
-                if self._stt_model:
-                    try:
-                        segments, info = self._stt_model.transcribe(
-                            tmp_path,
-                            beam_size=1,
-                            language="en",
-                            vad_filter=True,
-                            vad_parameters=dict(min_silence_duration_ms=500),
-                        )
-                        text = " ".join(seg.text for seg in segments).strip()
-                        audit_log(
-                            AuditEventType.VOICE_INPUT,
-                            severity=AuditSeverity.INFO,
-                            details={
-                                "action": "transcribe",
-                                "text_length": len(text),
-                                "language": info.language,
-                                "device": "cpu",
-                            },
-                        )
-                        return text if text else None
-                    except Exception as cpu_error:
-                        audit_log(
-                            AuditEventType.ERROR,
-                            severity=AuditSeverity.ERROR,
-                            details={"message": f"STT CPU fallback failed: {cpu_error}"},
-                        )
-                        return None
-            audit_log(AuditEventType.ERROR, severity=AuditSeverity.ERROR,
-                      details={"message": f"STT error: {e}"})
-            return None
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+            text = transcribe_pcm(audio_data, self._config.sample_rate, self._config.channels)
+        except TranscriptionError as error:
+            audit_log(AuditEventType.ERROR, severity=AuditSeverity.WARNING,
+                      details={"component": "speech_to_text", "message": str(error)})
+            raise
+        audit_log(AuditEventType.VOICE_INPUT, severity=AuditSeverity.INFO,
+                  details={"action": "transcribe", "text_length": len(text or "")})
+        return text
 
     def speak(self, text: str) -> bool:
         """Speak text using Piper TTS"""
@@ -426,7 +314,14 @@ class VoicePipeline:
 
     def is_ready(self) -> bool:
         """Check if voice components are ready"""
-        return self._stt_model is not None and (self._tts_voice is not None or True)  # SAPI fallback
+        return self.input_error() is None
+
+    def input_error(self) -> Optional[str]:
+        if not has_api_key():
+            return MISSING_KEY
+        if self._pyaudio is None:
+            return "Microphone input is unavailable. Check that PyAudio is installed."
+        return None
 
 
 # Global instance
